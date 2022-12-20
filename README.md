@@ -67,9 +67,9 @@ Recommended:
 * High-performance SSD with at least 2TB of free space
 * 25+ MBit/sec download Internet service
 
-### Full node on the main Ethereum network
+### Full node on the main ParexBetaChain network
 
-By far the most common scenario is people wanting to simply interact with the Ethereum
+By far the most common scenario is people wanting to simply interact with the ParexBetaChain
 network: create accounts; transfer funds; deploy and interact with contracts. For this
 particular use case, the user doesn't care about years-old historical data, so we can
 sync quickly to the current state of the network. To do so:
@@ -89,61 +89,7 @@ This command will:
    This tool is optional and if you leave it out you can always attach it to an already running
    `geth` instance with `geth attach`.
 
-### A Full node on the Görli test network
 
-Transitioning towards developers, if you'd like to play around with creating Ethereum
-contracts, you almost certainly would like to do that without any real money involved until
-you get the hang of the entire system. In other words, instead of attaching to the main
-network, you want to join the **test** network with your node, which is fully equivalent to
-the main network, but with play-Ether only.
-
-```shell
-$ geth --goerli console
-```
-
-The `console` subcommand has the same meaning as above and is equally
-useful on the testnet too.
-
-Specifying the `--goerli` flag, however, will reconfigure your `geth` instance a bit:
-
- * Instead of connecting to the main Ethereum network, the client will connect to the Görli
-   test network, which uses different P2P bootnodes, different network IDs and genesis
-   states.
- * Instead of using the default data directory (`~/.ethereum` on Linux for example), `geth`
-   will nest itself one level deeper into a `goerli` subfolder (`~/.ethereum/goerli` on
-   Linux). Note, on OSX and Linux this also means that attaching to a running testnet node
-   requires the use of a custom endpoint since `geth attach` will try to attach to a
-   production node endpoint by default, e.g.,
-   `geth attach <datadir>/goerli/geth.ipc`. Windows users are not affected by
-   this.
-
-*Note: Although some internal protective measures prevent transactions from
-crossing over between the main network and test network, you should always
-use separate accounts for play and real money. Unless you manually move
-accounts, `geth` will by default correctly separate the two networks and will not make any
-accounts available between them.*
-
-### Full node on the Rinkeby test network
-
-Go Ethereum also supports connecting to the older proof-of-authority based test network
-called [*Rinkeby*](https://www.rinkeby.io) which is operated by members of the community.
-
-```shell
-$ geth --rinkeby console
-```
-
-### Full node on the Ropsten test network
-
-In addition to Görli and Rinkeby, Geth also supports the ancient Ropsten testnet. The
-Ropsten test network is based on the Ethash proof-of-work consensus algorithm. As such,
-it has certain extra overhead and is more susceptible to reorganization attacks due to the
-network's low difficulty/security.
-
-```shell
-$ geth --ropsten console
-```
-
-*Note: Older Geth configurations store the Ropsten database in the `testnet` subdirectory.*
 
 ### Configuration
 
@@ -163,25 +109,6 @@ $ geth --your-favourite-flags dumpconfig
 
 *Note: This works only with `geth` v1.6.0 and above.*
 
-#### Docker quick start
-
-One of the quickest ways to get Ethereum up and running on your machine is by using
-Docker:
-
-```shell
-docker run -d --name ethereum-node -v /Users/alice/ethereum:/root \
-           -p 8545:8545 -p 30303:30303 \
-           ethereum/client-go
-```
-
-This will start `geth` in snap-sync mode with a DB memory allowance of 1GB, as the
-above command does.  It will also create a persistent volume in your home directory for
-saving your blockchain as well as map the default ports. There is also an `alpine` tag
-available for a slim version of the image.
-
-Do not forget `--http.addr 0.0.0.0`, if you want to access RPC from other containers
-and/or hosts. By default, `geth` binds to the local interface and RPC endpoints are not
-accessible from the outside.
 
 ### Programmatically interfacing `geth` nodes
 

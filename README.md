@@ -3,7 +3,7 @@
 Official Golang execution layer implementation of the Ethereum protocol.
 
 
-## Help Document
+## Help Documentation
 
 
 https://docs.parex.network 

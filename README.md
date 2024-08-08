@@ -1,4 +1,4 @@
-## Go ParexNetwork
+## Go Parex Network
 
 Official Golang execution layer implementation of the Ethereum protocol.
 
@@ -68,7 +68,7 @@ Recommended:
 * High-performance SSD with at least 2TB of free space
 * 25+ MBit/sec download Internet service
 
-### Full node on the main ParexNetwork
+### Full node on the main Parex Network
 
 By far the most common scenario is people wanting to simply interact with the ParexNetwork
 network: create accounts; transfer funds; deploy and interact with contracts. For this

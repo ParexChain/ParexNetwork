@@ -1,4 +1,4 @@
-## Go ParexBetaChain
+## Go ParexNetwork
 
 Official Golang execution layer implementation of the Ethereum protocol.
 
@@ -67,9 +67,9 @@ Recommended:
 * High-performance SSD with at least 2TB of free space
 * 25+ MBit/sec download Internet service
 
-### Full node on the main ParexBetaChain network
+### Full node on the main ParexNetwork
 
-By far the most common scenario is people wanting to simply interact with the ParexBetaChain
+By far the most common scenario is people wanting to simply interact with the ParexNetwork
 network: create accounts; transfer funds; deploy and interact with contracts. For this
 particular use case, the user doesn't care about years-old historical data, so we can
 sync quickly to the current state of the network. To do so:

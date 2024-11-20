@@ -17,46 +17,64 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"os"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers/logger"
-	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/internal/flags"
 	"github.com/ethereum/go-ethereum/tests"
-
 	"github.com/urfave/cli/v2"
 )
 
+var (
+	forkFlag = &cli.StringFlag{
+		Name:     "statetest.fork",
+		Usage:    "The hard-fork to run the test against",
+		Category: flags.VMCategory,
+	}
+	idxFlag = &cli.IntFlag{
+		Name:     "statetest.index",
+		Usage:    "The index of the subtest to run",
+		Category: flags.VMCategory,
+		Value:    -1, // default to select all subtest indices
+	}
+	testNameFlag = &cli.StringFlag{
+		Name:     "statetest.name",
+		Usage:    "The name of the state test to run",
+		Category: flags.VMCategory,
+	}
+)
 var stateTestCommand = &cli.Command{
 	Action:    stateTestCmd,
 	Name:      "statetest",
-	Usage:     "executes the given state tests",
+	Usage:     "Executes the given state tests. Filenames can be fed via standard input (batch mode) or as an argument (one-off execution).",
 	ArgsUsage: "<file>",
+	Flags: []cli.Flag{
+		forkFlag,
+		idxFlag,
+		testNameFlag,
+	},
 }
 
 // StatetestResult contains the execution status after running a state test, any
 // error that might have occurred and a dump of the final state if requested.
 type StatetestResult struct {
-	Name  string      `json:"name"`
-	Pass  bool        `json:"pass"`
-	Fork  string      `json:"fork"`
-	Error string      `json:"error,omitempty"`
-	State *state.Dump `json:"state,omitempty"`
+	Name       string       `json:"name"`
+	Pass       bool         `json:"pass"`
+	Root       *common.Hash `json:"stateRoot,omitempty"`
+	Fork       string       `json:"fork"`
+	Error      string       `json:"error,omitempty"`
+	State      *state.Dump  `json:"state,omitempty"`
+	BenchStats *execStats   `json:"benchStats,omitempty"`
 }
 
 func stateTestCmd(ctx *cli.Context) error {
-	if len(ctx.Args().First()) == 0 {
-		return errors.New("path-to-test argument required")
-	}
-	// Configure the go-ethereum logger
-	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
-	glogger.Verbosity(log.Lvl(ctx.Int(VerbosityFlag.Name)))
-	log.Root().SetHandler(glogger)
-
 	// Configure the EVM logger
 	config := &logger.Config{
 		EnableMemory:     !ctx.Bool(DisableMemoryFlag.Name),
@@ -64,64 +82,108 @@ func stateTestCmd(ctx *cli.Context) error {
 		DisableStorage:   ctx.Bool(DisableStorageFlag.Name),
 		EnableReturnData: !ctx.Bool(DisableReturnDataFlag.Name),
 	}
-	var (
-		tracer   vm.EVMLogger
-		debugger *logger.StructLogger
-	)
+	var cfg vm.Config
 	switch {
 	case ctx.Bool(MachineFlag.Name):
-		tracer = logger.NewJSONLogger(config, os.Stderr)
+		cfg.Tracer = logger.NewJSONLogger(config, os.Stderr)
 
 	case ctx.Bool(DebugFlag.Name):
-		debugger = logger.NewStructLogger(config)
-		tracer = debugger
-
-	default:
-		debugger = logger.NewStructLogger(config)
+		cfg.Tracer = logger.NewStructLogger(config).Hooks()
 	}
 	// Load the test content from the input file
-	src, err := os.ReadFile(ctx.Args().First())
+	if len(ctx.Args().First()) != 0 {
+		return runStateTest(ctx, ctx.Args().First(), cfg, ctx.Bool(DumpFlag.Name), ctx.Bool(BenchFlag.Name))
+	}
+	// Read filenames from stdin and execute back-to-back
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		fname := scanner.Text()
+		if len(fname) == 0 {
+			return nil
+		}
+		if err := runStateTest(ctx, fname, cfg, ctx.Bool(DumpFlag.Name), ctx.Bool(BenchFlag.Name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type stateTestCase struct {
+	name string
+	test tests.StateTest
+	st   tests.StateSubtest
+}
+
+// collectMatchedSubtests returns test cases which match against provided filtering CLI parameters
+func collectMatchedSubtests(ctx *cli.Context, testsByName map[string]tests.StateTest) []stateTestCase {
+	var res []stateTestCase
+	subtestName := ctx.String(testNameFlag.Name)
+	if subtestName != "" {
+		if subtest, ok := testsByName[subtestName]; ok {
+			testsByName := make(map[string]tests.StateTest)
+			testsByName[subtestName] = subtest
+		}
+	}
+	idx := ctx.Int(idxFlag.Name)
+	fork := ctx.String(forkFlag.Name)
+
+	for key, test := range testsByName {
+		for _, st := range test.Subtests() {
+			if idx != -1 && st.Index != idx {
+				continue
+			}
+			if fork != "" && st.Fork != fork {
+				continue
+			}
+			res = append(res, stateTestCase{name: key, st: st, test: test})
+		}
+	}
+	return res
+}
+
+// runStateTest loads the state-test given by fname, and executes the test.
+func runStateTest(ctx *cli.Context, fname string, cfg vm.Config, dump bool, bench bool) error {
+	src, err := os.ReadFile(fname)
 	if err != nil {
 		return err
 	}
-	var tests map[string]tests.StateTest
-	if err = json.Unmarshal(src, &tests); err != nil {
+	var testsByName map[string]tests.StateTest
+	if err := json.Unmarshal(src, &testsByName); err != nil {
 		return err
 	}
+
+	matchingTests := collectMatchedSubtests(ctx, testsByName)
+
 	// Iterate over all the tests, run them and aggregate the results
-	cfg := vm.Config{
-		Tracer: tracer,
-		Debug:  ctx.Bool(DebugFlag.Name) || ctx.Bool(MachineFlag.Name),
-	}
-	results := make([]StatetestResult, 0, len(tests))
-	for key, test := range tests {
-		for _, st := range test.Subtests() {
-			// Run the test and aggregate the result
-			result := &StatetestResult{Name: key, Fork: st.Fork, Pass: true}
-			_, s, err := test.Run(st, cfg, false)
-			// print state root for evmlab tracing
-			if ctx.Bool(MachineFlag.Name) && s != nil {
-				fmt.Fprintf(os.Stderr, "{\"stateRoot\": \"%x\"}\n", s.IntermediateRoot(false))
-			}
-			if err != nil {
-				// Test failed, mark as so and dump any state to aid debugging
-				result.Pass, result.Error = false, err.Error()
-				if ctx.Bool(DumpFlag.Name) && s != nil {
-					dump := s.RawDump(nil)
+	var results []StatetestResult
+	for _, test := range matchingTests {
+		// Run the test and aggregate the result
+		result := &StatetestResult{Name: test.name, Fork: test.st.Fork, Pass: true}
+		test.test.Run(test.st, cfg, false, rawdb.HashScheme, func(err error, tstate *tests.StateTestState) {
+			var root common.Hash
+			if tstate.StateDB != nil {
+				root = tstate.StateDB.IntermediateRoot(false)
+				result.Root = &root
+				fmt.Fprintf(os.Stderr, "{\"stateRoot\": \"%#x\"}\n", root)
+				if dump { // Dump any state to aid debugging
+					cpy, _ := state.New(root, tstate.StateDB.Database())
+					dump := cpy.RawDump(nil)
 					result.State = &dump
 				}
 			}
-
-			results = append(results, *result)
-
-			// Print any structured logs collected
-			if ctx.Bool(DebugFlag.Name) {
-				if debugger != nil {
-					fmt.Fprintln(os.Stderr, "#### TRACE ####")
-					logger.WriteTrace(os.Stderr, debugger.StructLogs())
-				}
+			if err != nil {
+				// Test failed, mark as so
+				result.Pass, result.Error = false, err.Error()
 			}
+		})
+		if bench {
+			_, stats, _ := timedExec(true, func() ([]byte, uint64, error) {
+				_, _, gasUsed, _ := test.test.RunNoVerify(test.st, cfg, false, rawdb.HashScheme)
+				return nil, gasUsed, nil
+			})
+			result.BenchStats = &stats
 		}
+		results = append(results, *result)
 	}
 	out, _ := json.MarshalIndent(results, "", "  ")
 	fmt.Println(string(out))

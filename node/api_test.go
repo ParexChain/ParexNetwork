@@ -244,7 +244,6 @@ func TestStartRPC(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -252,6 +251,9 @@ func TestStartRPC(t *testing.T) {
 			config := test.cfg
 			// config.Logger = testlog.Logger(t, log.LvlDebug)
 			config.P2P.NoDiscovery = true
+			if config.HTTPTimeouts == (rpc.HTTPTimeouts{}) {
+				config.HTTPTimeouts = rpc.DefaultHTTPTimeouts
+			}
 
 			// Create Node.
 			stack, err := New(&config)

@@ -19,6 +19,7 @@ package v4test
 import (
 	"bytes"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"net"
 	"time"
@@ -119,7 +120,7 @@ func (te *testenv) checkPingPong(pingHash []byte) error {
 // and a PING. The two packets do not have to be in any particular order.
 func (te *testenv) checkPong(reply v4wire.Packet, pingHash []byte) error {
 	if reply == nil {
-		return fmt.Errorf("expected PONG reply, got nil")
+		return errors.New("expected PONG reply, got nil")
 	}
 	if reply.Kind() != v4wire.PongPacket {
 		return fmt.Errorf("expected PONG reply, got %v %v", reply.Name(), reply)
@@ -256,6 +257,7 @@ func WrongPacketType(t *utesting.T) {
 func BondThenPingWithWrongFrom(t *utesting.T) {
 	te := newTestEnv(Remote, Listen1, Listen2)
 	defer te.close()
+
 	bond(t, te)
 
 	wrongEndpoint := v4wire.Endpoint{IP: net.ParseIP("192.0.2.0")}
@@ -265,10 +267,25 @@ func BondThenPingWithWrongFrom(t *utesting.T) {
 		To:         te.remoteEndpoint(),
 		Expiration: futureExpiration(),
 	})
-	if reply, _, err := te.read(te.l1); err != nil {
-		t.Fatal(err)
-	} else if err := te.checkPong(reply, pingHash); err != nil {
-		t.Fatal(err)
+
+waitForPong:
+	for {
+		reply, _, err := te.read(te.l1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch reply.Kind() {
+		case v4wire.PongPacket:
+			if err := te.checkPong(reply, pingHash); err != nil {
+				t.Fatal(err)
+			}
+			break waitForPong
+		case v4wire.FindnodePacket:
+			// FINDNODE from the node is acceptable here since the endpoint
+			// verification was performed earlier.
+		default:
+			t.Fatalf("Expected PONG, got %v %v", reply.Name(), reply)
+		}
 	}
 }
 
@@ -379,7 +396,7 @@ func FindnodePastExpiration(t *utesting.T) {
 
 // bond performs the endpoint proof with the remote node.
 func bond(t *utesting.T, te *testenv) {
-	te.send(te.l1, &v4wire.Ping{
+	pingHash := te.send(te.l1, &v4wire.Ping{
 		Version:    4,
 		From:       te.localEndpoint(te.l1),
 		To:         te.remoteEndpoint(),
@@ -401,7 +418,9 @@ func bond(t *utesting.T, te *testenv) {
 			})
 			gotPing = true
 		case *v4wire.Pong:
-			// TODO: maybe verify pong data here
+			if err := te.checkPong(req, pingHash); err != nil {
+				t.Fatal(err)
+			}
 			gotPong = true
 		}
 	}
@@ -478,7 +497,7 @@ func FindnodeAmplificationWrongIP(t *utesting.T) {
 	// If we receive a NEIGHBORS response, the attack worked and the test fails.
 	reply, _, _ := te.read(te.l2)
 	if reply != nil {
-		t.Error("Got NEIGHORS response for FINDNODE from wrong IP")
+		t.Error("Got NEIGHBORS response for FINDNODE from wrong IP")
 	}
 }
 

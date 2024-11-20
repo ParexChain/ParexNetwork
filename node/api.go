@@ -26,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/internal/debug"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
+	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/rpc"
 )
@@ -39,6 +40,9 @@ func (n *Node) apis() []rpc.API {
 		}, {
 			Namespace: "debug",
 			Service:   debug.Handler,
+		}, {
+			Namespace: "debug",
+			Service:   &p2pDebugAPI{n},
 		}, {
 			Namespace: "web3",
 			Service:   &web3API{n},
@@ -145,8 +149,6 @@ func (api *adminAPI) PeerEvents(ctx context.Context) (*rpc.Subscription, error) 
 				return
 			case <-rpcSub.Err():
 				return
-			case <-notifier.Closed():
-				return
 			}
 		}
 	}()
@@ -176,6 +178,10 @@ func (api *adminAPI) StartHTTP(host *string, port *int, cors *string, apis *stri
 		CorsAllowedOrigins: api.node.config.HTTPCors,
 		Vhosts:             api.node.config.HTTPVirtualHosts,
 		Modules:            api.node.config.HTTPModules,
+		rpcEndpointConfig: rpcEndpointConfig{
+			batchItemLimit:         api.node.config.BatchRequestLimit,
+			batchResponseSizeLimit: api.node.config.BatchResponseMaxSize,
+		},
 	}
 	if cors != nil {
 		config.CorsAllowedOrigins = nil
@@ -250,6 +256,10 @@ func (api *adminAPI) StartWS(host *string, port *int, allowedOrigins *string, ap
 		Modules: api.node.config.WSModules,
 		Origins: api.node.config.WSOrigins,
 		// ExposeAll: api.node.config.WSExposeAll,
+		rpcEndpointConfig: rpcEndpointConfig{
+			batchItemLimit:         api.node.config.BatchRequestLimit,
+			batchResponseSizeLimit: api.node.config.BatchResponseMaxSize,
+		},
 	}
 	if apis != nil {
 		config.Modules = nil
@@ -326,4 +336,17 @@ func (s *web3API) ClientVersion() string {
 // It assumes the input is hex encoded.
 func (s *web3API) Sha3(input hexutil.Bytes) hexutil.Bytes {
 	return crypto.Keccak256(input)
+}
+
+// p2pDebugAPI provides access to p2p internals for debugging.
+type p2pDebugAPI struct {
+	stack *Node
+}
+
+func (s *p2pDebugAPI) DiscoveryV4Table() [][]discover.BucketNode {
+	disc := s.stack.server.DiscoveryV4()
+	if disc != nil {
+		return disc.TableBuckets()
+	}
+	return nil
 }

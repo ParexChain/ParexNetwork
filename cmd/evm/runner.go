@@ -24,7 +24,7 @@ import (
 	"math/big"
 	"os"
 	goruntime "runtime"
-	"runtime/pprof"
+	"slices"
 	"testing"
 	"time"
 
@@ -34,21 +34,24 @@ import (
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
+	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/core/vm/runtime"
 	"github.com/ethereum/go-ethereum/eth/tracers/logger"
 	"github.com/ethereum/go-ethereum/internal/flags"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/triedb"
+	"github.com/ethereum/go-ethereum/triedb/hashdb"
 	"github.com/urfave/cli/v2"
 )
 
 var runCommand = &cli.Command{
 	Action:      runCmd,
 	Name:        "run",
-	Usage:       "run arbitrary evm binary",
+	Usage:       "Run arbitrary evm binary",
 	ArgsUsage:   "<code>",
 	Description: `The run command runs arbitrary EVM code.`,
+	Flags:       slices.Concat(vmFlags, traceFlags),
 }
 
 // readGenesis will read the given JSON format genesis file and return
@@ -73,42 +76,56 @@ func readGenesis(genesisPath string) *core.Genesis {
 }
 
 type execStats struct {
-	time           time.Duration // The execution time.
-	allocs         int64         // The number of heap allocations during execution.
-	bytesAllocated int64         // The cumulative number of bytes allocated during execution.
+	Time           time.Duration `json:"time"`           // The execution Time.
+	Allocs         int64         `json:"allocs"`         // The number of heap allocations during execution.
+	BytesAllocated int64         `json:"bytesAllocated"` // The cumulative number of bytes allocated during execution.
+	GasUsed        uint64        `json:"gasUsed"`        // the amount of gas used during execution
 }
 
-func timedExec(bench bool, execFunc func() ([]byte, uint64, error)) (output []byte, gasLeft uint64, stats execStats, err error) {
+func timedExec(bench bool, execFunc func() ([]byte, uint64, error)) ([]byte, execStats, error) {
 	if bench {
+		// Do one warm-up run
+		output, gasUsed, err := execFunc()
 		result := testing.Benchmark(func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				output, gasLeft, err = execFunc()
+				haveOutput, haveGasUsed, haveErr := execFunc()
+				if !bytes.Equal(haveOutput, output) {
+					b.Fatalf("output differs, have\n%x\nwant%x\n", haveOutput, output)
+				}
+				if haveGasUsed != gasUsed {
+					b.Fatalf("gas differs, have %v want%v", haveGasUsed, gasUsed)
+				}
+				if haveErr != err {
+					b.Fatalf("err differs, have %v want%v", haveErr, err)
+				}
 			}
 		})
-
 		// Get the average execution time from the benchmarking result.
 		// There are other useful stats here that could be reported.
-		stats.time = time.Duration(result.NsPerOp())
-		stats.allocs = result.AllocsPerOp()
-		stats.bytesAllocated = result.AllocedBytesPerOp()
-	} else {
-		var memStatsBefore, memStatsAfter goruntime.MemStats
-		goruntime.ReadMemStats(&memStatsBefore)
-		startTime := time.Now()
-		output, gasLeft, err = execFunc()
-		stats.time = time.Since(startTime)
-		goruntime.ReadMemStats(&memStatsAfter)
-		stats.allocs = int64(memStatsAfter.Mallocs - memStatsBefore.Mallocs)
-		stats.bytesAllocated = int64(memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc)
+		stats := execStats{
+			Time:           time.Duration(result.NsPerOp()),
+			Allocs:         result.AllocsPerOp(),
+			BytesAllocated: result.AllocedBytesPerOp(),
+			GasUsed:        gasUsed,
+		}
+		return output, stats, err
 	}
-
-	return output, gasLeft, stats, err
+	var memStatsBefore, memStatsAfter goruntime.MemStats
+	goruntime.ReadMemStats(&memStatsBefore)
+	t0 := time.Now()
+	output, gasUsed, err := execFunc()
+	duration := time.Since(t0)
+	goruntime.ReadMemStats(&memStatsAfter)
+	stats := execStats{
+		Time:           duration,
+		Allocs:         int64(memStatsAfter.Mallocs - memStatsBefore.Mallocs),
+		BytesAllocated: int64(memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc),
+		GasUsed:        gasUsed,
+	}
+	return output, stats, err
 }
 
 func runCmd(ctx *cli.Context) error {
-	glogger := log.NewGlogHandler(log.StreamHandler(os.Stderr, log.TerminalFormat(false)))
-	glogger.Verbosity(log.Lvl(ctx.Int(VerbosityFlag.Name)))
-	log.Root().SetHandler(glogger)
 	logconfig := &logger.Config{
 		EnableMemory:     !ctx.Bool(DisableMemoryFlag.Name),
 		DisableStack:     ctx.Bool(DisableStackFlag.Name),
@@ -118,37 +135,51 @@ func runCmd(ctx *cli.Context) error {
 	}
 
 	var (
-		tracer        vm.EVMLogger
-		debugLogger   *logger.StructLogger
-		statedb       *state.StateDB
-		chainConfig   *params.ChainConfig
-		sender        = common.BytesToAddress([]byte("sender"))
-		receiver      = common.BytesToAddress([]byte("receiver"))
-		genesisConfig *core.Genesis
+		tracer      *tracing.Hooks
+		debugLogger *logger.StructLogger
+		statedb     *state.StateDB
+		chainConfig *params.ChainConfig
+		sender      = common.BytesToAddress([]byte("sender"))
+		receiver    = common.BytesToAddress([]byte("receiver"))
+		preimages   = ctx.Bool(DumpFlag.Name)
+		blobHashes  []common.Hash  // TODO (MariusVanDerWijden) implement blob hashes in state tests
+		blobBaseFee = new(big.Int) // TODO (MariusVanDerWijden) implement blob fee in state tests
 	)
 	if ctx.Bool(MachineFlag.Name) {
 		tracer = logger.NewJSONLogger(logconfig, os.Stdout)
 	} else if ctx.Bool(DebugFlag.Name) {
 		debugLogger = logger.NewStructLogger(logconfig)
-		tracer = debugLogger
+		tracer = debugLogger.Hooks()
 	} else {
 		debugLogger = logger.NewStructLogger(logconfig)
 	}
+
+	initialGas := ctx.Uint64(GasFlag.Name)
+	genesisConfig := new(core.Genesis)
+	genesisConfig.GasLimit = initialGas
 	if ctx.String(GenesisFlag.Name) != "" {
-		gen := readGenesis(ctx.String(GenesisFlag.Name))
-		genesisConfig = gen
-		db := rawdb.NewMemoryDatabase()
-		genesis := gen.MustCommit(db)
-		statedb, _ = state.New(genesis.Root(), state.NewDatabase(db), nil)
-		chainConfig = gen.Config
+		genesisConfig = readGenesis(ctx.String(GenesisFlag.Name))
+		if genesisConfig.GasLimit != 0 {
+			initialGas = genesisConfig.GasLimit
+		}
 	} else {
-		statedb, _ = state.New(common.Hash{}, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
-		genesisConfig = new(core.Genesis)
+		genesisConfig.Config = params.AllDevChainProtocolChanges
 	}
+
+	db := rawdb.NewMemoryDatabase()
+	triedb := triedb.NewDatabase(db, &triedb.Config{
+		Preimages: preimages,
+		HashDB:    hashdb.Defaults,
+	})
+	defer triedb.Close()
+	genesis := genesisConfig.MustCommit(db, triedb)
+	sdb := state.NewDatabase(triedb, nil)
+	statedb, _ = state.New(genesis.Root(), sdb)
+	chainConfig = genesisConfig.Config
+
 	if ctx.String(SenderFlag.Name) != "" {
 		sender = common.HexToAddress(ctx.String(SenderFlag.Name))
 	}
-	statedb.CreateAccount(sender)
 
 	if ctx.String(ReceiverFlag.Name) != "" {
 		receiver = common.HexToAddress(ctx.String(ReceiverFlag.Name))
@@ -198,10 +229,6 @@ func runCmd(ctx *cli.Context) error {
 		}
 		code = common.Hex2Bytes(bin)
 	}
-	initialGas := ctx.Uint64(GasFlag.Name)
-	if genesisConfig.GasLimit != 0 {
-		initialGas = genesisConfig.GasLimit
-	}
 	runtimeConfig := runtime.Config{
 		Origin:      sender,
 		State:       statedb,
@@ -209,26 +236,15 @@ func runCmd(ctx *cli.Context) error {
 		GasPrice:    flags.GlobalBig(ctx, PriceFlag.Name),
 		Value:       flags.GlobalBig(ctx, ValueFlag.Name),
 		Difficulty:  genesisConfig.Difficulty,
-		Time:        new(big.Int).SetUint64(genesisConfig.Timestamp),
+		Time:        genesisConfig.Timestamp,
 		Coinbase:    genesisConfig.Coinbase,
 		BlockNumber: new(big.Int).SetUint64(genesisConfig.Number),
+		BaseFee:     genesisConfig.BaseFee,
+		BlobHashes:  blobHashes,
+		BlobBaseFee: blobBaseFee,
 		EVMConfig: vm.Config{
 			Tracer: tracer,
-			Debug:  ctx.Bool(DebugFlag.Name) || ctx.Bool(MachineFlag.Name),
 		},
-	}
-
-	if cpuProfilePath := ctx.String(CPUProfileFlag.Name); cpuProfilePath != "" {
-		f, err := os.Create(cpuProfilePath)
-		if err != nil {
-			fmt.Println("could not create CPU profile: ", err)
-			os.Exit(1)
-		}
-		if err := pprof.StartCPUProfile(f); err != nil {
-			fmt.Println("could not start CPU profile: ", err)
-			os.Exit(1)
-		}
-		defer pprof.StopCPUProfile()
 	}
 
 	if chainConfig != nil {
@@ -266,30 +282,26 @@ func runCmd(ctx *cli.Context) error {
 			statedb.SetCode(receiver, code)
 		}
 		execFunc = func() ([]byte, uint64, error) {
-			return runtime.Call(receiver, input, &runtimeConfig)
+			output, gasLeft, err := runtime.Call(receiver, input, &runtimeConfig)
+			return output, initialGas - gasLeft, err
 		}
 	}
 
 	bench := ctx.Bool(BenchFlag.Name)
-	output, leftOverGas, stats, err := timedExec(bench, execFunc)
+	output, stats, err := timedExec(bench, execFunc)
 
 	if ctx.Bool(DumpFlag.Name) {
-		statedb.Commit(true)
-		statedb.IntermediateRoot(true)
-		fmt.Println(string(statedb.Dump(nil)))
-	}
-
-	if memProfilePath := ctx.String(MemProfileFlag.Name); memProfilePath != "" {
-		f, err := os.Create(memProfilePath)
+		root, err := statedb.Commit(genesisConfig.Number, true)
 		if err != nil {
-			fmt.Println("could not create memory profile: ", err)
-			os.Exit(1)
+			fmt.Printf("Failed to commit changes %v\n", err)
+			return err
 		}
-		if err := pprof.WriteHeapProfile(f); err != nil {
-			fmt.Println("could not write memory profile: ", err)
-			os.Exit(1)
+		dumpdb, err := state.New(root, sdb)
+		if err != nil {
+			fmt.Printf("Failed to open statedb %v\n", err)
+			return err
 		}
-		f.Close()
+		fmt.Println(string(dumpdb.Dump(nil)))
 	}
 
 	if ctx.Bool(DebugFlag.Name) {
@@ -306,7 +318,7 @@ func runCmd(ctx *cli.Context) error {
 execution time:  %v
 allocations:     %d
 allocated bytes: %d
-`, initialGas-leftOverGas, stats.time, stats.allocs, stats.bytesAllocated)
+`, stats.GasUsed, stats.Time, stats.Allocs, stats.BytesAllocated)
 	}
 	if tracer == nil {
 		fmt.Printf("%#x\n", output)

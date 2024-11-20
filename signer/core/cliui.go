@@ -18,6 +18,7 @@ package core
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -31,8 +32,9 @@ import (
 )
 
 type CommandlineUI struct {
-	in *bufio.Reader
-	mu sync.Mutex
+	in  *bufio.Reader
+	mu  sync.Mutex
+	api *UIServerAPI
 }
 
 func NewCommandlineUI() *CommandlineUI {
@@ -40,7 +42,7 @@ func NewCommandlineUI() *CommandlineUI {
 }
 
 func (ui *CommandlineUI) RegisterUIServer(api *UIServerAPI) {
-	// noop
+	ui.api = api
 }
 
 // readString reads a single line from stdin, trimming if from spaces, enforcing
@@ -126,12 +128,18 @@ func (ui *CommandlineUI) ApproveTx(request *SignTxRequest) (SignTxResponse, erro
 		fmt.Printf("chainid:  %v\n", chainId)
 	}
 	if list := request.Transaction.AccessList; list != nil {
-		fmt.Printf("Accesslist\n")
+		fmt.Printf("Accesslist:\n")
 		for i, el := range *list {
 			fmt.Printf(" %d. %v\n", i, el.Address)
 			for j, slot := range el.StorageKeys {
 				fmt.Printf("   %d. %v\n", j, slot)
 			}
+		}
+	}
+	if len(request.Transaction.BlobHashes) > 0 {
+		fmt.Printf("Blob hashes:\n")
+		for _, bh := range request.Transaction.BlobHashes {
+			fmt.Printf("   %v\n", bh)
 		}
 	}
 	if request.Transaction.Data != nil {
@@ -241,9 +249,33 @@ func (ui *CommandlineUI) OnApprovedTx(tx ethapi.SignTransactionResult) {
 	}
 }
 
+func (ui *CommandlineUI) showAccounts() {
+	accounts, err := ui.api.ListAccounts(context.Background())
+	if err != nil {
+		log.Error("Error listing accounts", "err", err)
+		return
+	}
+	if len(accounts) == 0 {
+		fmt.Print("No accounts found\n")
+		return
+	}
+	var msg string
+	var out = new(strings.Builder)
+	if limit := 20; len(accounts) > limit {
+		msg = fmt.Sprintf("\nFirst %d accounts listed (%d more available).\n", limit, len(accounts)-limit)
+		accounts = accounts[:limit]
+	}
+	fmt.Fprint(out, "\n------- Available accounts -------\n")
+	for i, account := range accounts {
+		fmt.Fprintf(out, "%d. %s at %s\n", i, account.Address, account.URL)
+	}
+	fmt.Print(out.String(), msg)
+}
+
 func (ui *CommandlineUI) OnSignerStartup(info StartupInfo) {
-	fmt.Printf("------- Signer info -------\n")
+	fmt.Print("\n------- Signer info -------\n")
 	for k, v := range info.Info {
 		fmt.Printf("* %v : %v\n", k, v)
 	}
+	go ui.showAccounts()
 }

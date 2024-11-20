@@ -76,7 +76,7 @@ type typedQueue interface {
 // concurrentFetch iteratively downloads scheduled block parts, taking available
 // peers, reserving a chunk of fetch requests for each and waiting for delivery
 // or timeouts.
-func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
+func (d *Downloader) concurrentFetch(queue typedQueue) error {
 	// Create a delivery channel to accept responses from all peers
 	responses := make(chan *eth.Response)
 
@@ -91,8 +91,8 @@ func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
 		}
 	}()
 	ordering := make(map[*eth.Request]int)
-	timeouts := prque.New(func(data interface{}, index int) {
-		ordering[data.(*eth.Request)] = index
+	timeouts := prque.New[int64, *eth.Request](func(data *eth.Request, index int) {
+		ordering[data] = index
 	})
 
 	timeout := time.NewTimer(0)
@@ -126,10 +126,6 @@ func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
 	// Prepare the queue and fetch block parts until the block header fetcher's done
 	finished := false
 	for {
-		// Short circuit if we lost all our peers
-		if d.peers.Len() == 0 && !beaconMode {
-			return errNoPeers
-		}
 		// If there's nothing more to fetch, wait or terminate
 		if queue.pending() == 0 {
 			if len(pending) == 0 && finished {
@@ -158,27 +154,20 @@ func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
 			}
 			sort.Sort(&peerCapacitySort{idles, caps})
 
-			var (
-				progressed bool
-				throttled  bool
-				queued     = queue.pending()
-			)
+			var throttled bool
 			for _, peer := range idles {
 				// Short circuit if throttling activated or there are no more
 				// queued tasks to be retrieved
 				if throttled {
 					break
 				}
-				if queued = queue.pending(); queued == 0 {
+				if queued := queue.pending(); queued == 0 {
 					break
 				}
 				// Reserve a chunk of fetches for a peer. A nil can mean either that
 				// no more headers are available, or that the peer is known not to
 				// have them.
-				request, progress, throttle := queue.reserve(peer, queue.capacity(peer, d.peers.rates.TargetRoundTrip()))
-				if progress {
-					progressed = true
-				}
+				request, _, throttle := queue.reserve(peer, queue.capacity(peer, d.peers.rates.TargetRoundTrip()))
 				if throttle {
 					throttled = true
 					throttleCounter.Inc(1)
@@ -206,11 +195,6 @@ func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
 				if timeouts.Size() == 1 {
 					timeout.Reset(ttl)
 				}
-			}
-			// Make sure that we have peers available for fetching. If all peers have been tried
-			// and all failed throw an error
-			if !progressed && !throttled && len(pending) == 0 && len(idles) == d.peers.Len() && queued > 0 && !beaconMode {
-				return errPeersUnavailable
 			}
 		}
 		// Wait for something to happen
@@ -268,27 +252,26 @@ func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
 			// below is purely for to catch programming errors, given the correct
 			// code, there's no possible order of events that should result in a
 			// timeout firing for a non-existent event.
-			item, exp := timeouts.Peek()
+			req, exp := timeouts.Peek()
 			if now, at := time.Now(), time.Unix(0, -exp); now.Before(at) {
 				log.Error("Timeout triggered but not reached", "left", at.Sub(now))
 				timeout.Reset(at.Sub(now))
 				continue
 			}
-			req := item.(*eth.Request)
-
 			// Stop tracking the timed out request from a timing perspective,
 			// cancel it, so it's not considered in-flight anymore, but keep
 			// the peer marked busy to prevent assigning a second request and
 			// overloading it further.
 			delete(pending, req.Peer)
 			stales[req.Peer] = req
-			delete(ordering, req)
 
-			timeouts.Pop()
+			timeouts.Pop() // Popping an item will reorder indices in `ordering`, delete after, otherwise will resurrect!
 			if timeouts.Size() > 0 {
 				_, exp := timeouts.Peek()
 				timeout.Reset(time.Until(time.Unix(0, -exp)))
 			}
+			delete(ordering, req)
+
 			// New timeout potentially set if there are more requests pending,
 			// reschedule the failed one to a free peer
 			fails := queue.unreserve(req.Peer)
@@ -316,16 +299,6 @@ func (d *Downloader) concurrentFetch(queue typedQueue, beaconMode bool) error {
 				queue.updateCapacity(peer, 0, 0)
 			} else {
 				d.dropPeer(peer.id)
-
-				// If this peer was the master peer, abort sync immediately
-				d.cancelLock.RLock()
-				master := peer.id == d.cancelPeer
-				d.cancelLock.RUnlock()
-
-				if master {
-					d.cancel()
-					return errTimeout
-				}
 			}
 
 		case res := <-responses:

@@ -18,6 +18,7 @@ package tests
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -33,14 +34,16 @@ import (
 )
 
 var (
-	baseDir            = filepath.Join(".", "testdata")
-	blockTestDir       = filepath.Join(baseDir, "BlockchainTests")
-	stateTestDir       = filepath.Join(baseDir, "GeneralStateTests")
-	legacyStateTestDir = filepath.Join(baseDir, "LegacyTests", "Constantinople", "GeneralStateTests")
-	transactionTestDir = filepath.Join(baseDir, "TransactionTests")
-	rlpTestDir         = filepath.Join(baseDir, "RLPTests")
-	difficultyTestDir  = filepath.Join(baseDir, "BasicTests")
-	benchmarksDir      = filepath.Join(".", "evm-benchmarks", "benchmarks")
+	baseDir                        = filepath.Join(".", "testdata")
+	blockTestDir                   = filepath.Join(baseDir, "BlockchainTests")
+	stateTestDir                   = filepath.Join(baseDir, "GeneralStateTests")
+	legacyStateTestDir             = filepath.Join(baseDir, "LegacyTests", "Constantinople", "GeneralStateTests")
+	transactionTestDir             = filepath.Join(baseDir, "TransactionTests")
+	rlpTestDir                     = filepath.Join(baseDir, "RLPTests")
+	difficultyTestDir              = filepath.Join(baseDir, "BasicTests")
+	executionSpecBlockchainTestDir = filepath.Join(".", "spec-tests", "fixtures", "blockchain_tests")
+	executionSpecStateTestDir      = filepath.Join(".", "spec-tests", "fixtures", "state_tests")
+	benchmarksDir                  = filepath.Join(".", "evm-benchmarks", "benchmarks")
 )
 
 func readJSON(reader io.Reader, value interface{}) error {
@@ -105,7 +108,7 @@ type testFailure struct {
 	reason string
 }
 
-// skipShortMode skips tests matching when the -short flag is used.
+// slow adds expected slow tests matching the pattern.
 func (tm *testMatcher) slow(pattern string) {
 	tm.slowpat = append(tm.slowpat, regexp.MustCompile(pattern))
 }
@@ -180,7 +183,7 @@ func (tm *testMatcher) checkFailure(t *testing.T, err error) error {
 			t.Logf("error: %v", err)
 			return nil
 		}
-		return fmt.Errorf("test succeeded unexpectedly")
+		return errors.New("test succeeded unexpectedly")
 	}
 	return err
 }

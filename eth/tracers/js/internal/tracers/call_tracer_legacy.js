@@ -219,7 +219,7 @@
 		return this.finalize(result);
 	},
 
-	// finalize recreates a call object using the final desired field oder for json
+	// finalize recreates a call object using the final desired field order for json
 	// serialization. This is a nicety feature to pass meaningfully ordered results
 	// to users who don't interpret it, just display it.
 	finalize: function(call) {
@@ -233,7 +233,6 @@
 			input:   call.input,
 			output:  call.output,
 			error:   call.error,
-			time:    call.time,
 			calls:   call.calls,
 		}
 		for (var key in sorted) {

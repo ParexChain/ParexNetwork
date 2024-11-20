@@ -20,6 +20,7 @@ import (
 	"math/rand"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -30,13 +31,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
-	"golang.org/x/exp/slices"
 )
 
 var testSigData = make([]byte, 32)
 
 func TestKeyStore(t *testing.T) {
-	t.Parallel()
 	dir, ks := tmpKeyStore(t, true)
 
 	a, err := ks.NewAccount("foo")
@@ -71,7 +70,6 @@ func TestKeyStore(t *testing.T) {
 }
 
 func TestSign(t *testing.T) {
-	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
 
 	pass := "" // not used but required by API
@@ -88,7 +86,6 @@ func TestSign(t *testing.T) {
 }
 
 func TestSignWithPassphrase(t *testing.T) {
-	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
 
 	pass := "passwd"
@@ -283,7 +280,6 @@ type walletEvent struct {
 // Tests that wallet notifications and correctly fired when accounts are added
 // or deleted from the keystore.
 func TestWalletNotifications(t *testing.T) {
-	t.Parallel()
 	_, ks := tmpKeyStore(t, false)
 
 	// Subscribe to the wallet feed and collect events.
@@ -345,7 +341,6 @@ func TestWalletNotifications(t *testing.T) {
 
 // TestImportExport tests the import functionality of a keystore.
 func TestImportECDSA(t *testing.T) {
-	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
 	key, err := crypto.GenerateKey()
 	if err != nil {
@@ -364,7 +359,6 @@ func TestImportECDSA(t *testing.T) {
 
 // TestImportECDSA tests the import and export functionality of a keystore.
 func TestImportExport(t *testing.T) {
-	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
 	acc, err := ks.NewAccount("old")
 	if err != nil {
@@ -393,7 +387,6 @@ func TestImportExport(t *testing.T) {
 // TestImportRace tests the keystore on races.
 // This test should fail under -race if importing races.
 func TestImportRace(t *testing.T) {
-	t.Parallel()
 	_, ks := tmpKeyStore(t, true)
 	acc, err := ks.NewAccount("old")
 	if err != nil {
@@ -404,19 +397,19 @@ func TestImportRace(t *testing.T) {
 		t.Fatalf("failed to export account: %v", acc)
 	}
 	_, ks2 := tmpKeyStore(t, true)
-	var atom atomic.Uint32
+	var atom uint32
 	var wg sync.WaitGroup
 	wg.Add(2)
 	for i := 0; i < 2; i++ {
 		go func() {
 			defer wg.Done()
 			if _, err := ks2.Import(json, "new", "new"); err != nil {
-				atom.Add(1)
+				atomic.AddUint32(&atom, 1)
 			}
 		}()
 	}
 	wg.Wait()
-	if atom.Load() != 1 {
+	if atom != 1 {
 		t.Errorf("Import is racy")
 	}
 }
@@ -431,7 +424,7 @@ func checkAccounts(t *testing.T, live map[common.Address]accounts.Account, walle
 	for _, account := range live {
 		liveList = append(liveList, account)
 	}
-	slices.SortFunc(liveList, byURL)
+	sort.Sort(accountsByURL(liveList))
 	for j, wallet := range wallets {
 		if accs := wallet.Accounts(); len(accs) != 1 {
 			t.Errorf("wallet %d: contains invalid number of accounts: have %d, want 1", j, len(accs))

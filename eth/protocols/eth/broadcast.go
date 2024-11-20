@@ -142,17 +142,13 @@ func (p *Peer) announceTransactions() {
 		if done == nil && len(queue) > 0 {
 			// Pile transaction hashes until we reach our allowed network limit
 			var (
-				count        int
-				pending      []common.Hash
-				pendingTypes []byte
-				pendingSizes []uint32
-				size         common.StorageSize
+				count   int
+				pending []common.Hash
+				size    common.StorageSize
 			)
 			for count = 0; count < len(queue) && size < maxTxPacketSize; count++ {
-				if tx := p.txpool.Get(queue[count]); tx != nil {
+				if p.txpool.Get(queue[count]) != nil {
 					pending = append(pending, queue[count])
-					pendingTypes = append(pendingTypes, tx.Type())
-					pendingSizes = append(pendingSizes, uint32(tx.Size()))
 					size += common.HashLength
 				}
 			}
@@ -163,7 +159,7 @@ func (p *Peer) announceTransactions() {
 			if len(pending) > 0 {
 				done = make(chan struct{})
 				go func() {
-					if err := p.sendPooledTransactionHashes(pending, pendingTypes, pendingSizes); err != nil {
+					if err := p.sendPooledTransactionHashes(pending); err != nil {
 						fail <- err
 						return
 					}

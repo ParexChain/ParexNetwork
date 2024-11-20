@@ -49,10 +49,10 @@ func (b *testBackend) HeaderByNumber(ctx context.Context, number rpc.BlockNumber
 		number = 0
 	}
 	if number == rpc.FinalizedBlockNumber {
-		return b.chain.CurrentFinalBlock(), nil
+		return b.chain.CurrentFinalizedBlock().Header(), nil
 	}
 	if number == rpc.SafeBlockNumber {
-		return b.chain.CurrentSafeBlock(), nil
+		return b.chain.CurrentSafeBlock().Header(), nil
 	}
 	if number == rpc.LatestBlockNumber {
 		number = testHead
@@ -75,10 +75,10 @@ func (b *testBackend) BlockByNumber(ctx context.Context, number rpc.BlockNumber)
 		number = 0
 	}
 	if number == rpc.FinalizedBlockNumber {
-		number = rpc.BlockNumber(b.chain.CurrentFinalBlock().Number.Uint64())
+		return b.chain.CurrentFinalizedBlock(), nil
 	}
 	if number == rpc.SafeBlockNumber {
-		number = rpc.BlockNumber(b.chain.CurrentSafeBlock().Number.Uint64())
+		return b.chain.CurrentSafeBlock(), nil
 	}
 	if number == rpc.LatestBlockNumber {
 		number = testHead
@@ -126,7 +126,7 @@ func newTestBackend(t *testing.T, londonBlock *big.Int, pending bool) *testBacke
 		config = *params.TestChainConfig // needs copy because it is modified below
 		gspec  = &core.Genesis{
 			Config: &config,
-			Alloc:  types.GenesisAlloc{addr: {Balance: big.NewInt(math.MaxInt64)}},
+			Alloc:  core.GenesisAlloc{addr: {Balance: big.NewInt(math.MaxInt64)}},
 		}
 		signer = types.LatestSigner(gspec.Config)
 	)
@@ -169,8 +169,8 @@ func newTestBackend(t *testing.T, londonBlock *big.Int, pending bool) *testBacke
 		t.Fatalf("Failed to create local chain, %v", err)
 	}
 	chain.InsertChain(blocks)
-	chain.SetFinalized(chain.GetBlockByNumber(25).Header())
-	chain.SetSafe(chain.GetBlockByNumber(25).Header())
+	chain.SetFinalized(chain.GetBlockByNumber(25))
+	chain.SetSafe(chain.GetBlockByNumber(25))
 	return &testBackend{chain: chain, pending: pending}
 }
 

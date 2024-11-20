@@ -88,15 +88,18 @@ func (i *indexEntry) bounds(end *indexEntry) (startOffset, endOffset, fileId uin
 // It consists of a data file (snappy encoded arbitrary data blobs) and an indexEntry
 // file (uncompressed 64 bit indices into the data file).
 type freezerTable struct {
-	items      atomic.Uint64 // Number of items stored in the table (including items removed from tail)
-	itemOffset atomic.Uint64 // Number of items removed from the table
+	// WARNING: The `items` field is accessed atomically. On 32 bit platforms, only
+	// 64-bit aligned fields can be atomic. The struct is guaranteed to be so aligned,
+	// so take advantage of that (https://golang.org/pkg/sync/atomic/#pkg-note-BUG).
+	items      uint64 // Number of items stored in the table (including items removed from tail)
+	itemOffset uint64 // Number of items removed from the table
 
 	// itemHidden is the number of items marked as deleted. Tail deletion is
 	// only supported at file level which means the actual deletion will be
 	// delayed until the entire data file is marked as deleted. Before that
 	// these items will be hidden to prevent being visited again. The value
 	// should never be lower than itemOffset.
-	itemHidden atomic.Uint64
+	itemHidden uint64
 
 	noCompression bool // if true, disables snappy compression. Note: does not work retroactively
 	readonly      bool
@@ -212,12 +215,7 @@ func (t *freezerTable) repair() error {
 	}
 	// Ensure the index is a multiple of indexEntrySize bytes
 	if overflow := stat.Size() % indexEntrySize; overflow != 0 {
-		if t.readonly {
-			return fmt.Errorf("index file(path: %s, name: %s) size is not a multiple of %d", t.path, t.name, indexEntrySize)
-		}
-		if err := truncateFreezerFile(t.index, stat.Size()-overflow); err != nil {
-			return err
-		} // New file can't trigger this path
+		truncateFreezerFile(t.index, stat.Size()-overflow) // New file can't trigger this path
 	}
 	// Retrieve the file sizes and prepare for truncation
 	if stat, err = t.index.Stat(); err != nil {
@@ -231,7 +229,6 @@ func (t *freezerTable) repair() error {
 		lastIndex   indexEntry
 		contentSize int64
 		contentExp  int64
-		verbose     bool
 	)
 	// Read index zero, determine what file is the earliest
 	// and what item offset to use
@@ -243,14 +240,14 @@ func (t *freezerTable) repair() error {
 	// which is not enough in theory but enough in practice.
 	// TODO: use uint64 to represent total removed items.
 	t.tailId = firstIndex.filenum
-	t.itemOffset.Store(uint64(firstIndex.offset))
+	t.itemOffset = uint64(firstIndex.offset)
 
 	// Load metadata from the file
-	meta, err := loadMetadata(t.meta, t.itemOffset.Load())
+	meta, err := loadMetadata(t.meta, t.itemOffset)
 	if err != nil {
 		return err
 	}
-	t.itemHidden.Store(meta.VirtualTail)
+	t.itemHidden = meta.VirtualTail
 
 	// Read the last index, use the default value in case the freezer is empty
 	if offsetsSize == indexEntrySize {
@@ -258,12 +255,6 @@ func (t *freezerTable) repair() error {
 	} else {
 		t.index.ReadAt(buffer, offsetsSize-indexEntrySize)
 		lastIndex.unmarshalBinary(buffer)
-	}
-	// Print an error log if the index is corrupted due to an incorrect
-	// last index item. While it is theoretically possible to have a zero offset
-	// by storing all zero-size items, it is highly unlikely to occur in practice.
-	if lastIndex.offset == 0 && offsetsSize/indexEntrySize > 1 {
-		log.Error("Corrupted index file detected", "lastOffset", lastIndex.offset, "indexes", offsetsSize/indexEntrySize)
 	}
 	if t.readonly {
 		t.head, err = t.openFile(lastIndex.filenum, openFreezerFileForReadOnly)
@@ -281,13 +272,9 @@ func (t *freezerTable) repair() error {
 	// Keep truncating both files until they come in sync
 	contentExp = int64(lastIndex.offset)
 	for contentExp != contentSize {
-		if t.readonly {
-			return fmt.Errorf("freezer table(path: %s, name: %s, num: %d) is corrupted", t.path, t.name, lastIndex.filenum)
-		}
-		verbose = true
 		// Truncate the head file to the last offset pointer
 		if contentExp < contentSize {
-			t.logger.Warn("Truncating dangling head", "indexed", contentExp, "stored", contentSize)
+			t.logger.Warn("Truncating dangling head", "indexed", common.StorageSize(contentExp), "stored", common.StorageSize(contentSize))
 			if err := truncateFreezerFile(t.head, contentExp); err != nil {
 				return err
 			}
@@ -295,7 +282,7 @@ func (t *freezerTable) repair() error {
 		}
 		// Truncate the index to point within the head file
 		if contentExp > contentSize {
-			t.logger.Warn("Truncating dangling indexes", "indexes", offsetsSize/indexEntrySize, "indexed", contentExp, "stored", contentSize)
+			t.logger.Warn("Truncating dangling indexes", "indexed", common.StorageSize(contentExp), "stored", common.StorageSize(contentSize))
 			if err := truncateFreezerFile(t.index, offsetsSize-indexEntrySize); err != nil {
 				return err
 			}
@@ -342,7 +329,7 @@ func (t *freezerTable) repair() error {
 		}
 	}
 	// Update the item and byte counters and return
-	t.items.Store(t.itemOffset.Load() + uint64(offsetsSize/indexEntrySize-1)) // last indexEntry points to the end of the data file
+	t.items = t.itemOffset + uint64(offsetsSize/indexEntrySize-1) // last indexEntry points to the end of the data file
 	t.headBytes = contentSize
 	t.headId = lastIndex.filenum
 
@@ -356,11 +343,7 @@ func (t *freezerTable) repair() error {
 	if err := t.preopen(); err != nil {
 		return err
 	}
-	if verbose {
-		t.logger.Info("Chain freezer table opened", "items", t.items.Load(), "deleted", t.itemOffset.Load(), "hidden", t.itemHidden.Load(), "tailId", t.tailId, "headId", t.headId, "size", t.headBytes)
-	} else {
-		t.logger.Debug("Chain freezer table opened", "items", t.items.Load(), "size", common.StorageSize(t.headBytes))
-	}
+	t.logger.Debug("Chain freezer table opened", "items", t.items, "size", common.StorageSize(t.headBytes))
 	return nil
 }
 
@@ -393,11 +376,11 @@ func (t *freezerTable) truncateHead(items uint64) error {
 	defer t.lock.Unlock()
 
 	// Ensure the given truncate target falls in the correct range
-	existing := t.items.Load()
+	existing := atomic.LoadUint64(&t.items)
 	if existing <= items {
 		return nil
 	}
-	if items < t.itemHidden.Load() {
+	if items < atomic.LoadUint64(&t.itemHidden) {
 		return errors.New("truncation below tail")
 	}
 	// We need to truncate, save the old size for metrics tracking
@@ -414,11 +397,8 @@ func (t *freezerTable) truncateHead(items uint64) error {
 
 	// Truncate the index file first, the tail position is also considered
 	// when calculating the new freezer table length.
-	length := items - t.itemOffset.Load()
+	length := items - atomic.LoadUint64(&t.itemOffset)
 	if err := truncateFreezerFile(t.index, int64(length+1)*indexEntrySize); err != nil {
-		return err
-	}
-	if err := t.index.Sync(); err != nil {
 		return err
 	}
 	// Calculate the new expected size of the data file and truncate it
@@ -443,7 +423,6 @@ func (t *freezerTable) truncateHead(items uint64) error {
 		// Release any files _after the current head -- both the previous head
 		// and any files which may have been opened for reading
 		t.releaseFilesAfter(expected.filenum, true)
-
 		// Set back the historic head
 		t.head = newHead
 		t.headId = expected.filenum
@@ -451,12 +430,9 @@ func (t *freezerTable) truncateHead(items uint64) error {
 	if err := truncateFreezerFile(t.head, int64(expected.offset)); err != nil {
 		return err
 	}
-	if err := t.head.Sync(); err != nil {
-		return err
-	}
 	// All data files truncated, set internal counters and return
 	t.headBytes = int64(expected.offset)
-	t.items.Store(items)
+	atomic.StoreUint64(&t.items, items)
 
 	// Retrieve the new size and update the total size counter
 	newSize, err := t.sizeNolock()
@@ -467,30 +443,16 @@ func (t *freezerTable) truncateHead(items uint64) error {
 	return nil
 }
 
-// sizeHidden returns the total data size of hidden items in the freezer table.
-// This function assumes the lock is already held.
-func (t *freezerTable) sizeHidden() (uint64, error) {
-	hidden, offset := t.itemHidden.Load(), t.itemOffset.Load()
-	if hidden <= offset {
-		return 0, nil
-	}
-	indices, err := t.getIndices(hidden-1, 1)
-	if err != nil {
-		return 0, err
-	}
-	return uint64(indices[1].offset), nil
-}
-
 // truncateTail discards any recent data before the provided threshold number.
 func (t *freezerTable) truncateTail(items uint64) error {
 	t.lock.Lock()
 	defer t.lock.Unlock()
 
 	// Ensure the given truncate target falls in the correct range
-	if t.itemHidden.Load() >= items {
+	if atomic.LoadUint64(&t.itemHidden) >= items {
 		return nil
 	}
-	if t.items.Load() < items {
+	if atomic.LoadUint64(&t.items) < items {
 		return errors.New("truncation above head")
 	}
 	// Load the new tail index by the given new tail position
@@ -498,10 +460,10 @@ func (t *freezerTable) truncateTail(items uint64) error {
 		newTailId uint32
 		buffer    = make([]byte, indexEntrySize)
 	)
-	if t.items.Load() == items {
+	if atomic.LoadUint64(&t.items) == items {
 		newTailId = t.headId
 	} else {
-		offset := items - t.itemOffset.Load()
+		offset := items - atomic.LoadUint64(&t.itemOffset)
 		if _, err := t.index.ReadAt(buffer, int64((offset+1)*indexEntrySize)); err != nil {
 			return err
 		}
@@ -509,14 +471,8 @@ func (t *freezerTable) truncateTail(items uint64) error {
 		newTail.unmarshalBinary(buffer)
 		newTailId = newTail.filenum
 	}
-	// Save the old size for metrics tracking. This needs to be done
-	// before any updates to either itemHidden or itemOffset.
-	oldSize, err := t.sizeNolock()
-	if err != nil {
-		return err
-	}
 	// Update the virtual tail marker and hidden these entries in table.
-	t.itemHidden.Store(items)
+	atomic.StoreUint64(&t.itemHidden, items)
 	if err := writeMetadata(t.meta, newMetadata(items)); err != nil {
 		return err
 	}
@@ -529,12 +485,18 @@ func (t *freezerTable) truncateTail(items uint64) error {
 	if t.tailId > newTailId {
 		return fmt.Errorf("invalid index, tail-file %d, item-file %d", t.tailId, newTailId)
 	}
+	// Hidden items exceed the current tail file, drop the relevant
+	// data files. We need to truncate, save the old size for metrics
+	// tracking.
+	oldSize, err := t.sizeNolock()
+	if err != nil {
+		return err
+	}
 	// Count how many items can be deleted from the file.
 	var (
 		newDeleted = items
-		deleted    = t.itemOffset.Load()
+		deleted    = atomic.LoadUint64(&t.itemOffset)
 	)
-	// Hidden items exceed the current tail file, drop the relevant data files.
 	for current := items - 1; current >= deleted; current -= 1 {
 		if _, err := t.index.ReadAt(buffer, int64((current-deleted+1)*indexEntrySize)); err != nil {
 			return err
@@ -551,10 +513,6 @@ func (t *freezerTable) truncateTail(items uint64) error {
 	if err := t.meta.Sync(); err != nil {
 		return err
 	}
-	// Close the index file before shorten it.
-	if err := t.index.Close(); err != nil {
-		return err
-	}
 	// Truncate the deleted index entries from the index file.
 	err = copyFrom(t.index.Name(), t.index.Name(), indexEntrySize*(newDeleted-deleted+1), func(f *os.File) error {
 		tailIndex := indexEntry{
@@ -568,17 +526,16 @@ func (t *freezerTable) truncateTail(items uint64) error {
 		return err
 	}
 	// Reopen the modified index file to load the changes
+	if err := t.index.Close(); err != nil {
+		return err
+	}
 	t.index, err = openFreezerFileForAppend(t.index.Name())
 	if err != nil {
 		return err
 	}
-	// Sync the file to ensure changes are flushed to disk
-	if err := t.index.Sync(); err != nil {
-		return err
-	}
 	// Release any files before the current tail
 	t.tailId = newTailId
-	t.itemOffset.Store(newDeleted)
+	atomic.StoreUint64(&t.itemOffset, newDeleted)
 	t.releaseFilesBefore(t.tailId, true)
 
 	// Retrieve the new size and update the total size counter
@@ -596,33 +553,21 @@ func (t *freezerTable) Close() error {
 	defer t.lock.Unlock()
 
 	var errs []error
-	doClose := func(f *os.File, sync bool, close bool) {
-		if sync && !t.readonly {
-			if err := f.Sync(); err != nil {
-				errs = append(errs, err)
-			}
-		}
-		if close {
-			if err := f.Close(); err != nil {
-				errs = append(errs, err)
-			}
-		}
-	}
-	// Trying to fsync a file opened in rdonly causes "Access denied"
-	// error on Windows.
-	doClose(t.index, true, true)
-	doClose(t.meta, true, true)
-
-	// The preopened non-head data-files are all opened in readonly.
-	// The head is opened in rw-mode, so we sync it here - but since it's also
-	// part of t.files, it will be closed in the loop below.
-	doClose(t.head, true, false) // sync but do not close
-
-	for _, f := range t.files {
-		doClose(f, false, true) // close but do not sync
+	if err := t.index.Close(); err != nil {
+		errs = append(errs, err)
 	}
 	t.index = nil
+
+	if err := t.meta.Close(); err != nil {
+		errs = append(errs, err)
+	}
 	t.meta = nil
+
+	for _, f := range t.files {
+		if err := f.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
 	t.head = nil
 
 	if errs != nil {
@@ -693,8 +638,7 @@ func (t *freezerTable) releaseFilesBefore(num uint32, remove bool) {
 // it will return error.
 func (t *freezerTable) getIndices(from, count uint64) ([]*indexEntry, error) {
 	// Apply the table-offset
-	from = from - t.itemOffset.Load()
-
+	from = from - t.itemOffset
 	// For reading N items, we need N+1 indices.
 	buffer := make([]byte, (count+1)*indexEntrySize)
 	if _, err := t.index.ReadAt(buffer, int64(from*indexEntrySize)); err != nil {
@@ -755,7 +699,7 @@ func (t *freezerTable) RetrieveItems(start, count, maxBytes uint64) ([][]byte, e
 		if !t.noCompression {
 			decompressedSize, _ = snappy.DecodedLen(item)
 		}
-		if i > 0 && maxBytes != 0 && uint64(outputSize+decompressedSize) > maxBytes {
+		if i > 0 && uint64(outputSize+decompressedSize) > maxBytes {
 			break
 		}
 		if !t.noCompression {
@@ -773,21 +717,19 @@ func (t *freezerTable) RetrieveItems(start, count, maxBytes uint64) ([][]byte, e
 }
 
 // retrieveItems reads up to 'count' items from the table. It reads at least
-// one item, but otherwise avoids reading more than maxBytes bytes. Freezer
-// will ignore the size limitation and continuously allocate memory to store
-// data if maxBytes is 0. It returns the (potentially compressed) data, and
-// the sizes.
+// one item, but otherwise avoids reading more than maxBytes bytes.
+// It returns the (potentially compressed) data, and the sizes.
 func (t *freezerTable) retrieveItems(start, count, maxBytes uint64) ([]byte, []int, error) {
 	t.lock.RLock()
 	defer t.lock.RUnlock()
 
 	// Ensure the table and the item are accessible
-	if t.index == nil || t.head == nil || t.meta == nil {
+	if t.index == nil || t.head == nil {
 		return nil, nil, errClosed
 	}
 	var (
-		items  = t.items.Load()      // the total items(head + 1)
-		hidden = t.itemHidden.Load() // the number of hidden items
+		items  = atomic.LoadUint64(&t.items)      // the total items(head + 1)
+		hidden = atomic.LoadUint64(&t.itemHidden) // the number of hidden items
 	)
 	// Ensure the start is written, not deleted from the tail, and that the
 	// caller actually wants something
@@ -797,22 +739,25 @@ func (t *freezerTable) retrieveItems(start, count, maxBytes uint64) ([]byte, []i
 	if start+count > items {
 		count = items - start
 	}
-	var output []byte // Buffer to read data into
-	if maxBytes != 0 {
-		output = make([]byte, 0, maxBytes)
-	} else {
-		output = make([]byte, 0, 1024) // initial buffer cap
-	}
+	var (
+		output     = make([]byte, maxBytes) // Buffer to read data into
+		outputSize int                      // Used size of that buffer
+	)
 	// readData is a helper method to read a single data item from disk.
 	readData := func(fileId, start uint32, length int) error {
-		output = grow(output, length)
+		// In case a small limit is used, and the elements are large, may need to
+		// realloc the read-buffer when reading the first (and only) item.
+		if len(output) < length {
+			output = make([]byte, length)
+		}
 		dataFile, exist := t.files[fileId]
 		if !exist {
 			return fmt.Errorf("missing data file %d", fileId)
 		}
-		if _, err := dataFile.ReadAt(output[len(output)-length:], int64(start)); err != nil {
-			return fmt.Errorf("%w, fileid: %d, start: %d, length: %d", err, fileId, start, length)
+		if _, err := dataFile.ReadAt(output[outputSize:outputSize+length], int64(start)); err != nil {
+			return err
 		}
+		outputSize += length
 		return nil
 	}
 	// Read all the indexes in one go
@@ -843,7 +788,7 @@ func (t *freezerTable) retrieveItems(start, count, maxBytes uint64) ([]byte, []i
 			}
 			readStart = 0
 		}
-		if i > 0 && uint64(totalSize+size) > maxBytes && maxBytes != 0 {
+		if i > 0 && uint64(totalSize+size) > maxBytes {
 			// About to break out due to byte limit being exceeded. We don't
 			// read this last item, but we need to do the deferred reads now.
 			if unreadSize > 0 {
@@ -857,7 +802,7 @@ func (t *freezerTable) retrieveItems(start, count, maxBytes uint64) ([]byte, []i
 		unreadSize += size
 		totalSize += size
 		sizes = append(sizes, size)
-		if i == len(indices)-2 || (uint64(totalSize) > maxBytes && maxBytes != 0) {
+		if i == len(indices)-2 || uint64(totalSize) > maxBytes {
 			// Last item, need to do the read now
 			if err := readData(secondIndex.filenum, readStart, unreadSize); err != nil {
 				return nil, nil, err
@@ -865,16 +810,13 @@ func (t *freezerTable) retrieveItems(start, count, maxBytes uint64) ([]byte, []i
 			break
 		}
 	}
-
-	// Update metrics.
-	t.readMeter.Mark(int64(totalSize))
-	return output, sizes, nil
+	return output[:outputSize], sizes, nil
 }
 
 // has returns an indicator whether the specified number data is still accessible
 // in the freezer table.
 func (t *freezerTable) has(number uint64) bool {
-	return t.items.Load() > number && t.itemHidden.Load() <= number
+	return atomic.LoadUint64(&t.items) > number && atomic.LoadUint64(&t.itemHidden) <= number
 }
 
 // size returns the total data size in the freezer table.
@@ -885,18 +827,14 @@ func (t *freezerTable) size() (uint64, error) {
 	return t.sizeNolock()
 }
 
-// sizeNolock returns the total data size in the freezer table. This function
-// assumes the lock is already held.
+// sizeNolock returns the total data size in the freezer table without obtaining
+// the mutex first.
 func (t *freezerTable) sizeNolock() (uint64, error) {
 	stat, err := t.index.Stat()
 	if err != nil {
 		return 0, err
 	}
-	hidden, err := t.sizeHidden()
-	if err != nil {
-		return 0, err
-	}
-	total := uint64(t.maxFileSize)*uint64(t.headId-t.tailId) + uint64(t.headBytes) + uint64(stat.Size()) - hidden
+	total := uint64(t.maxFileSize)*uint64(t.headId-t.tailId) + uint64(t.headBytes) + uint64(stat.Size())
 	return total, nil
 }
 
@@ -914,11 +852,8 @@ func (t *freezerTable) advanceHead() error {
 	if err != nil {
 		return err
 	}
-	// Commit the contents of the old file to stable storage and
-	// tear it down. It will be re-opened in read-only mode.
-	if err := t.head.Sync(); err != nil {
-		return err
-	}
+
+	// Close old file, and reopen in RDONLY mode.
 	t.releaseFile(t.headId)
 	t.openFile(t.headId, openFreezerFileForReadOnly)
 
@@ -932,22 +867,13 @@ func (t *freezerTable) advanceHead() error {
 // Sync pushes any pending data from memory out to disk. This is an expensive
 // operation, so use it with care.
 func (t *freezerTable) Sync() error {
-	t.lock.Lock()
-	defer t.lock.Unlock()
-	if t.index == nil || t.head == nil || t.meta == nil {
-		return errClosed
+	if err := t.index.Sync(); err != nil {
+		return err
 	}
-	var err error
-	trackError := func(e error) {
-		if e != nil && err == nil {
-			err = e
-		}
+	if err := t.meta.Sync(); err != nil {
+		return err
 	}
-
-	trackError(t.index.Sync())
-	trackError(t.meta.Sync())
-	trackError(t.head.Sync())
-	return err
+	return t.head.Sync()
 }
 
 func (t *freezerTable) dumpIndexStdout(start, stop int64) {
@@ -967,8 +893,7 @@ func (t *freezerTable) dumpIndex(w io.Writer, start, stop int64) {
 		fmt.Fprintf(w, "Failed to decode freezer table %v\n", err)
 		return
 	}
-	fmt.Fprintf(w, "Version %d count %d, deleted %d, hidden %d\n", meta.Version,
-		t.items.Load(), t.itemOffset.Load(), t.itemHidden.Load())
+	fmt.Fprintf(w, "Version %d deleted %d, hidden %d\n", meta.Version, atomic.LoadUint64(&t.itemOffset), atomic.LoadUint64(&t.itemHidden))
 
 	buf := make([]byte, indexEntrySize)
 

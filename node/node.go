@@ -37,7 +37,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rpc"
-	"github.com/gofrs/flock"
+	"github.com/prometheus/tsdb/fileutil"
 )
 
 // Node is a container on which services can be registered.
@@ -46,13 +46,13 @@ type Node struct {
 	config        *Config
 	accman        *accounts.Manager
 	log           log.Logger
-	keyDir        string        // key store directory
-	keyDirTemp    bool          // If true, key directory will be removed by Stop
-	dirLock       *flock.Flock  // prevents concurrent use of instance directory
-	stop          chan struct{} // Channel to wait for termination notifications
-	server        *p2p.Server   // Currently running P2P networking layer
-	startStopLock sync.Mutex    // Start/Stop are protected by an additional lock
-	state         int           // Tracks state of node lifecycle
+	keyDir        string            // key store directory
+	keyDirTemp    bool              // If true, key directory will be removed by Stop
+	dirLock       fileutil.Releaser // prevents concurrent use of instance directory
+	stop          chan struct{}     // Channel to wait for termination notifications
+	server        *p2p.Server       // Currently running P2P networking layer
+	startStopLock sync.Mutex        // Start/Stop are protected by an additional lock
+	state         int               // Tracks state of node lifecycle
 
 	lock          sync.Mutex
 	lifecycles    []Lifecycle // All registered backends, services, and auxiliary services that have a lifecycle
@@ -101,11 +101,10 @@ func New(conf *Config) (*Node, error) {
 	if strings.HasSuffix(conf.Name, ".ipc") {
 		return nil, errors.New(`Config.Name cannot end in ".ipc"`)
 	}
-	server := rpc.NewServer()
-	server.SetBatchLimits(conf.BatchRequestLimit, conf.BatchResponseMaxSize)
+
 	node := &Node{
 		config:        conf,
-		inprocHandler: server,
+		inprocHandler: rpc.NewServer(),
 		eventmux:      new(event.TypeMux),
 		log:           conf.Logger,
 		stop:          make(chan struct{}),
@@ -120,7 +119,7 @@ func New(conf *Config) (*Node, error) {
 	if err := node.openDataDir(); err != nil {
 		return nil, err
 	}
-	keyDir, isEphem, err := conf.GetKeyStoreDir()
+	keyDir, isEphem, err := getKeyStoreDir(conf)
 	if err != nil {
 		return nil, err
 	}
@@ -321,20 +320,20 @@ func (n *Node) openDataDir() error {
 	}
 	// Lock the instance directory to prevent concurrent use by another instance as well as
 	// accidental use of the instance directory as a database.
-	n.dirLock = flock.New(filepath.Join(instdir, "LOCK"))
-
-	if locked, err := n.dirLock.TryLock(); err != nil {
-		return err
-	} else if !locked {
-		return ErrDatadirUsed
+	release, _, err := fileutil.Flock(filepath.Join(instdir, "LOCK"))
+	if err != nil {
+		return convertFileLockError(err)
 	}
+	n.dirLock = release
 	return nil
 }
 
 func (n *Node) closeDataDir() {
 	// Release instance directory lock.
-	if n.dirLock != nil && n.dirLock.Locked() {
-		n.dirLock.Unlock()
+	if n.dirLock != nil {
+		if err := n.dirLock.Release(); err != nil {
+			n.log.Error("Can't release datadir lock", "err", err)
+		}
 		n.dirLock = nil
 	}
 }
@@ -377,25 +376,13 @@ func (n *Node) obtainJWTSecret(cliParam string) ([]byte, error) {
 // startup. It's not meant to be called at any time afterwards as it makes certain
 // assumptions about the state of the node.
 func (n *Node) startRPC() error {
-	// Filter out personal api
-	var apis []rpc.API
-	for _, api := range n.rpcAPIs {
-		if api.Namespace == "personal" {
-			if n.config.EnablePersonal {
-				log.Warn("Deprecated personal namespace activated")
-			} else {
-				continue
-			}
-		}
-		apis = append(apis, api)
-	}
-	if err := n.startInProc(apis); err != nil {
+	if err := n.startInProc(); err != nil {
 		return err
 	}
 
 	// Configure IPC.
 	if n.ipc.endpoint != "" {
-		if err := n.ipc.start(apis); err != nil {
+		if err := n.ipc.start(n.rpcAPIs); err != nil {
 			return err
 		}
 	}
@@ -403,11 +390,6 @@ func (n *Node) startRPC() error {
 		servers           []*httpServer
 		openAPIs, allAPIs = n.getAPIs()
 	)
-
-	rpcConfig := rpcEndpointConfig{
-		batchItemLimit:         n.config.BatchRequestLimit,
-		batchResponseSizeLimit: n.config.BatchResponseMaxSize,
-	}
 
 	initHttp := func(server *httpServer, port int) error {
 		if err := server.setListenAddr(n.config.HTTPHost, port); err != nil {
@@ -418,7 +400,6 @@ func (n *Node) startRPC() error {
 			Vhosts:             n.config.HTTPVirtualHosts,
 			Modules:            n.config.HTTPModules,
 			prefix:             n.config.HTTPPathPrefix,
-			rpcEndpointConfig:  rpcConfig,
 		}); err != nil {
 			return err
 		}
@@ -432,10 +413,9 @@ func (n *Node) startRPC() error {
 			return err
 		}
 		if err := server.enableWS(openAPIs, wsConfig{
-			Modules:           n.config.WSModules,
-			Origins:           n.config.WSOrigins,
-			prefix:            n.config.WSPathPrefix,
-			rpcEndpointConfig: rpcConfig,
+			Modules: n.config.WSModules,
+			Origins: n.config.WSOrigins,
+			prefix:  n.config.WSPathPrefix,
 		}); err != nil {
 			return err
 		}
@@ -449,34 +429,26 @@ func (n *Node) startRPC() error {
 		if err := server.setListenAddr(n.config.AuthAddr, port); err != nil {
 			return err
 		}
-		sharedConfig := rpcEndpointConfig{
-			jwtSecret:              secret,
-			batchItemLimit:         engineAPIBatchItemLimit,
-			batchResponseSizeLimit: engineAPIBatchResponseSizeLimit,
-			httpBodyLimit:          engineAPIBodyLimit,
-		}
-		err := server.enableRPC(allAPIs, httpConfig{
+		if err := server.enableRPC(allAPIs, httpConfig{
 			CorsAllowedOrigins: DefaultAuthCors,
 			Vhosts:             n.config.AuthVirtualHosts,
 			Modules:            DefaultAuthModules,
 			prefix:             DefaultAuthPrefix,
-			rpcEndpointConfig:  sharedConfig,
-		})
-		if err != nil {
+			jwtSecret:          secret,
+		}); err != nil {
 			return err
 		}
 		servers = append(servers, server)
-
 		// Enable auth via WS
 		server = n.wsServerForPort(port, true)
 		if err := server.setListenAddr(n.config.AuthAddr, port); err != nil {
 			return err
 		}
 		if err := server.enableWS(allAPIs, wsConfig{
-			Modules:           DefaultAuthModules,
-			Origins:           DefaultAuthOrigins,
-			prefix:            DefaultAuthPrefix,
-			rpcEndpointConfig: sharedConfig,
+			Modules:   DefaultAuthModules,
+			Origins:   DefaultAuthOrigins,
+			prefix:    DefaultAuthPrefix,
+			jwtSecret: secret,
 		}); err != nil {
 			return err
 		}
@@ -538,8 +510,8 @@ func (n *Node) stopRPC() {
 }
 
 // startInProc registers all RPC APIs on the inproc server.
-func (n *Node) startInProc(apis []rpc.API) error {
-	for _, api := range apis {
+func (n *Node) startInProc() error {
+	for _, api := range n.rpcAPIs {
 		if err := n.inprocHandler.RegisterName(api.Namespace, api.Service); err != nil {
 			return err
 		}
@@ -621,8 +593,8 @@ func (n *Node) RegisterHandler(name, path string, handler http.Handler) {
 }
 
 // Attach creates an RPC client attached to an in-process API handler.
-func (n *Node) Attach() *rpc.Client {
-	return rpc.DialInProc(n.inprocHandler)
+func (n *Node) Attach() (*rpc.Client, error) {
+	return rpc.DialInProc(n.inprocHandler), nil
 }
 
 // RPCHandler returns the in-process RPC request handler.
@@ -725,14 +697,7 @@ func (n *Node) OpenDatabase(name string, cache, handles int, namespace string, r
 	if n.config.DataDir == "" {
 		db = rawdb.NewMemoryDatabase()
 	} else {
-		db, err = rawdb.Open(rawdb.OpenOptions{
-			Type:      n.config.DBEngine,
-			Directory: n.ResolvePath(name),
-			Namespace: namespace,
-			Cache:     cache,
-			Handles:   handles,
-			ReadOnly:  readonly,
-		})
+		db, err = rawdb.NewLevelDBDatabase(n.ResolvePath(name), cache, handles, namespace, readonly)
 	}
 
 	if err == nil {
@@ -752,20 +717,13 @@ func (n *Node) OpenDatabaseWithFreezer(name string, cache, handles int, ancient 
 	if n.state == closedState {
 		return nil, ErrNodeStopped
 	}
+
 	var db ethdb.Database
 	var err error
 	if n.config.DataDir == "" {
 		db = rawdb.NewMemoryDatabase()
 	} else {
-		db, err = rawdb.Open(rawdb.OpenOptions{
-			Type:              n.config.DBEngine,
-			Directory:         n.ResolvePath(name),
-			AncientsDirectory: n.ResolveAncient(name, ancient),
-			Namespace:         namespace,
-			Cache:             cache,
-			Handles:           handles,
-			ReadOnly:          readonly,
-		})
+		db, err = rawdb.NewLevelDBDatabaseWithFreezer(n.ResolvePath(name), cache, handles, n.ResolveAncient(name, ancient), namespace, readonly)
 	}
 
 	if err == nil {

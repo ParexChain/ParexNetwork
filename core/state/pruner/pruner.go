@@ -31,11 +31,11 @@ import (
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
-	"github.com/ethereum/go-ethereum/triedb"
 )
 
 const (
@@ -55,9 +55,18 @@ const (
 	rangeCompactionThreshold = 100000
 )
 
+var (
+	// emptyRoot is the known root hash of an empty trie.
+	emptyRoot = common.HexToHash("56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
+
+	// emptyCode is the known hash of the empty EVM bytecode.
+	emptyCode = crypto.Keccak256(nil)
+)
+
 // Config includes all the configurations for pruning.
 type Config struct {
 	Datadir   string // The directory of the state database
+	Cachedir  string // The directory of state clean cache
 	BloomSize uint64 // The Megabytes of memory allocated to bloom-filter
 }
 
@@ -86,16 +95,13 @@ func NewPruner(db ethdb.Database, config Config) (*Pruner, error) {
 	if headBlock == nil {
 		return nil, errors.New("failed to load head block")
 	}
-	// Offline pruning is only supported in legacy hash based scheme.
-	triedb := triedb.NewDatabase(db, triedb.HashDefaults)
-
 	snapconfig := snapshot.Config{
 		CacheSize:  256,
 		Recovery:   false,
 		NoBuild:    true,
 		AsyncBuild: false,
 	}
-	snaptree, err := snapshot.New(snapconfig, db, triedb, headBlock.Root())
+	snaptree, err := snapshot.New(snapconfig, db, trie.NewDatabase(db), headBlock.Root())
 	if err != nil {
 		return nil, err // The relevant snapshot(s) might not exist
 	}
@@ -122,16 +128,16 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 	// the trie nodes(and codes) belong to the active state will be filtered
 	// out. A very small part of stale tries will also be filtered because of
 	// the false-positive rate of bloom filter. But the assumption is held here
-	// that the false-positive is low enough(~0.05%). The probability of the
+	// that the false-positive is low enough(~0.05%). The probablity of the
 	// dangling node is the state root is super low. So the dangling nodes in
 	// theory will never ever be visited again.
 	var (
-		skipped, count int
-		size           common.StorageSize
-		pstart         = time.Now()
-		logged         = time.Now()
-		batch          = maindb.NewBatch()
-		iter           = maindb.NewIterator(nil, nil)
+		count  int
+		size   common.StorageSize
+		pstart = time.Now()
+		logged = time.Now()
+		batch  = maindb.NewBatch()
+		iter   = maindb.NewIterator(nil, nil)
 	)
 	for iter.Next() {
 		key := iter.Key()
@@ -149,8 +155,9 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 			if _, exist := middleStateRoots[common.BytesToHash(checkKey)]; exist {
 				log.Debug("Forcibly delete the middle state roots", "hash", common.BytesToHash(checkKey))
 			} else {
-				if stateBloom.Contain(checkKey) {
-					skipped += 1
+				if ok, err := stateBloom.Contain(checkKey); err != nil {
+					return err
+				} else if ok {
 					continue
 				}
 			}
@@ -167,7 +174,7 @@ func prune(snaptree *snapshot.Tree, root common.Hash, maindb ethdb.Database, sta
 				eta = time.Duration(left/speed) * time.Millisecond
 			}
 			if time.Since(logged) > 8*time.Second {
-				log.Info("Pruning state data", "nodes", count, "skipped", skipped, "size", size,
+				log.Info("Pruning state data", "nodes", count, "size", size,
 					"elapsed", common.PrettyDuration(time.Since(pstart)), "eta", common.PrettyDuration(eta))
 				logged = time.Now()
 			}
@@ -245,7 +252,7 @@ func (p *Pruner) Prune(root common.Hash) error {
 		return err
 	}
 	if stateBloomRoot != (common.Hash{}) {
-		return RecoverPruning(p.config.Datadir, p.db)
+		return RecoverPruning(p.config.Datadir, p.db, p.config.Cachedir)
 	}
 	// If the target state root is not specified, use the HEAD-127 as the
 	// target. The reason for picking it is:
@@ -269,8 +276,8 @@ func (p *Pruner) Prune(root common.Hash) error {
 	// Ensure the root is really present. The weak assumption
 	// is the presence of root can indicate the presence of the
 	// entire trie.
-	if !rawdb.HasLegacyTrieNode(p.db, root) {
-		// The special case is for clique based networks(goerli
+	if !rawdb.HasTrieNode(p.db, root) {
+		// The special case is for clique based networks(rinkeby, goerli
 		// and some other private networks), it's possible that two
 		// consecutive blocks will have same root. In this case snapshot
 		// difflayer won't be created. So HEAD-127 may not paired with
@@ -283,7 +290,7 @@ func (p *Pruner) Prune(root common.Hash) error {
 		// as the pruning target.
 		var found bool
 		for i := len(layers) - 2; i >= 2; i-- {
-			if rawdb.HasLegacyTrieNode(p.db, layers[i].Root()) {
+			if rawdb.HasTrieNode(p.db, layers[i].Root()) {
 				root = layers[i].Root()
 				found = true
 				log.Info("Selecting middle-layer as the pruning target", "root", root, "depth", i)
@@ -303,6 +310,12 @@ func (p *Pruner) Prune(root common.Hash) error {
 			log.Info("Selecting user-specified state as the pruning target", "root", root)
 		}
 	}
+	// Before start the pruning, delete the clean trie cache first.
+	// It's necessary otherwise in the next restart we will hit the
+	// deleted state root in the "clean cache" so that the incomplete
+	// state is picked for usage.
+	deleteCleanTrieCache(p.config.Cachedir)
+
 	// All the state roots of the middle layer should be forcibly pruned,
 	// otherwise the dangling state will be left.
 	middleRoots := make(map[common.Hash]struct{})
@@ -340,7 +353,7 @@ func (p *Pruner) Prune(root common.Hash) error {
 // pruning can be resumed. What's more if the bloom filter is constructed, the
 // pruning **has to be resumed**. Otherwise a lot of dangling nodes may be left
 // in the disk.
-func RecoverPruning(datadir string, db ethdb.Database) error {
+func RecoverPruning(datadir string, db ethdb.Database, trieCachePath string) error {
 	stateBloomPath, stateBloomRoot, err := findBloomFilter(datadir)
 	if err != nil {
 		return err
@@ -350,7 +363,7 @@ func RecoverPruning(datadir string, db ethdb.Database) error {
 	}
 	headBlock := rawdb.ReadHeadBlock(db)
 	if headBlock == nil {
-		return errors.New("failed to load head block")
+		return errors.New("Failed to load head block")
 	}
 	// Initialize the snapshot tree in recovery mode to handle this special case:
 	// - Users run the `prune-state` command multiple times
@@ -366,9 +379,7 @@ func RecoverPruning(datadir string, db ethdb.Database) error {
 		NoBuild:    true,
 		AsyncBuild: false,
 	}
-	// Offline pruning is only supported in legacy hash based scheme.
-	triedb := triedb.NewDatabase(db, triedb.HashDefaults)
-	snaptree, err := snapshot.New(snapconfig, db, triedb, headBlock.Root())
+	snaptree, err := snapshot.New(snapconfig, db, trie.NewDatabase(db), headBlock.Root())
 	if err != nil {
 		return err // The relevant snapshot(s) might not exist
 	}
@@ -377,6 +388,12 @@ func RecoverPruning(datadir string, db ethdb.Database) error {
 		return err
 	}
 	log.Info("Loaded state bloom filter", "path", stateBloomPath)
+
+	// Before start the pruning, delete the clean trie cache first.
+	// It's necessary otherwise in the next restart we will hit the
+	// deleted state root in the "clean cache" so that the incomplete
+	// state is picked for usage.
+	deleteCleanTrieCache(trieCachePath)
 
 	// All the state roots of the middle layers should be forcibly pruned,
 	// otherwise the dangling state will be left.
@@ -410,14 +427,11 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 	if genesis == nil {
 		return errors.New("missing genesis block")
 	}
-	t, err := trie.NewStateTrie(trie.StateTrieID(genesis.Root()), triedb.NewDatabase(db, triedb.HashDefaults))
+	t, err := trie.NewStateTrie(trie.StateTrieID(genesis.Root()), trie.NewDatabase(db))
 	if err != nil {
 		return err
 	}
-	accIter, err := t.NodeIterator(nil)
-	if err != nil {
-		return err
-	}
+	accIter := t.NodeIterator(nil)
 	for accIter.Next(true) {
 		hash := accIter.Hash()
 
@@ -432,16 +446,13 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 			if err := rlp.DecodeBytes(accIter.LeafBlob(), &acc); err != nil {
 				return err
 			}
-			if acc.Root != types.EmptyRootHash {
+			if acc.Root != emptyRoot {
 				id := trie.StorageTrieID(genesis.Root(), common.BytesToHash(accIter.LeafKey()), acc.Root)
-				storageTrie, err := trie.NewStateTrie(id, triedb.NewDatabase(db, triedb.HashDefaults))
+				storageTrie, err := trie.NewStateTrie(id, trie.NewDatabase(db))
 				if err != nil {
 					return err
 				}
-				storageIter, err := storageTrie.NodeIterator(nil)
-				if err != nil {
-					return err
-				}
+				storageIter := storageTrie.NodeIterator(nil)
 				for storageIter.Next(true) {
 					hash := storageIter.Hash()
 					if hash != (common.Hash{}) {
@@ -452,7 +463,7 @@ func extractGenesis(db ethdb.Database, stateBloom *stateBloom) error {
 					return storageIter.Error()
 				}
 			}
-			if !bytes.Equal(acc.CodeHash, types.EmptyCodeHash.Bytes()) {
+			if !bytes.Equal(acc.CodeHash, emptyCode) {
 				stateBloom.Put(acc.CodeHash, nil)
 			}
 		}
@@ -490,4 +501,24 @@ func findBloomFilter(datadir string) (string, common.Hash, error) {
 		return "", common.Hash{}, err
 	}
 	return stateBloomPath, stateBloomRoot, nil
+}
+
+const warningLog = `
+
+WARNING!
+
+The clean trie cache is not found. Please delete it by yourself after the 
+pruning. Remember don't start the Geth without deleting the clean trie cache
+otherwise the entire database may be damaged!
+
+Check the command description "geth snapshot prune-state --help" for more details.
+`
+
+func deleteCleanTrieCache(path string) {
+	if !common.FileExist(path) {
+		log.Warn(warningLog)
+		return
+	}
+	os.RemoveAll(path)
+	log.Info("Deleted trie clean cache", "path", path)
 }

@@ -21,6 +21,7 @@ import (
 	"math/big"
 	"strconv"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -28,7 +29,7 @@ import (
 )
 
 func init() {
-	tracers.DefaultDirectory.Register("4byteTracer", newFourByteTracer, false)
+	register("4byteTracer", newFourByteTracer)
 }
 
 // fourByteTracer searches for 4byte-identifiers, and collects them for post-processing.
@@ -46,9 +47,9 @@ func init() {
 //	  0xc281d19e-0: 1
 //	}
 type fourByteTracer struct {
-	noopTracer
+	env               *vm.EVM
 	ids               map[string]int   // ids aggregates the 4byte ids found
-	interrupt         atomic.Bool      // Atomic flag to signal execution interruption
+	interrupt         uint32           // Atomic flag to signal execution interruption
 	reason            error            // Textual reason for the interruption
 	activePrecompiles []common.Address // Updated on CaptureStart based on given rules
 }
@@ -80,8 +81,10 @@ func (t *fourByteTracer) store(id []byte, size int) {
 
 // CaptureStart implements the EVMLogger interface to initialize the tracing operation.
 func (t *fourByteTracer) CaptureStart(env *vm.EVM, from common.Address, to common.Address, create bool, input []byte, gas uint64, value *big.Int) {
+	t.env = env
+
 	// Update list of precompiles based on current block
-	rules := env.ChainConfig().Rules(env.Context.BlockNumber, env.Context.Random != nil, env.Context.Time)
+	rules := env.ChainConfig().Rules(env.Context.BlockNumber, env.Context.Random != nil)
 	t.activePrecompiles = vm.ActivePrecompiles(rules)
 
 	// Save the outer calldata also
@@ -90,10 +93,15 @@ func (t *fourByteTracer) CaptureStart(env *vm.EVM, from common.Address, to commo
 	}
 }
 
+// CaptureState implements the EVMLogger interface to trace a single step of VM execution.
+func (t *fourByteTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
+}
+
 // CaptureEnter is called when EVM enters a new scope (via call, create or selfdestruct).
 func (t *fourByteTracer) CaptureEnter(op vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
 	// Skip if tracing was interrupted
-	if t.interrupt.Load() {
+	if atomic.LoadUint32(&t.interrupt) > 0 {
+		t.env.Cancel()
 		return
 	}
 	if len(input) < 4 {
@@ -111,6 +119,23 @@ func (t *fourByteTracer) CaptureEnter(op vm.OpCode, from common.Address, to comm
 	t.store(input[0:4], len(input)-4)
 }
 
+// CaptureExit is called when EVM exits a scope, even if the scope didn't
+// execute any code.
+func (t *fourByteTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
+}
+
+// CaptureFault implements the EVMLogger interface to trace an execution fault.
+func (t *fourByteTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, depth int, err error) {
+}
+
+// CaptureEnd is called after the call finishes to finalize the tracing.
+func (t *fourByteTracer) CaptureEnd(output []byte, gasUsed uint64, _ time.Duration, err error) {
+}
+
+func (*fourByteTracer) CaptureTxStart(gasLimit uint64) {}
+
+func (*fourByteTracer) CaptureTxEnd(restGas uint64) {}
+
 // GetResult returns the json-encoded nested list of call traces, and any
 // error arising from the encoding or forceful termination (via `Stop`).
 func (t *fourByteTracer) GetResult() (json.RawMessage, error) {
@@ -124,7 +149,7 @@ func (t *fourByteTracer) GetResult() (json.RawMessage, error) {
 // Stop terminates execution of the tracer at the first opportune moment.
 func (t *fourByteTracer) Stop(err error) {
 	t.reason = err
-	t.interrupt.Store(true)
+	atomic.StoreUint32(&t.interrupt, 1)
 }
 
 func bytesToHex(s []byte) string {

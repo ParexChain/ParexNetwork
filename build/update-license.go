@@ -46,13 +46,12 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"text/template"
 	"time"
-
-	"golang.org/x/exp/slices"
 )
 
 var (
@@ -65,8 +64,10 @@ var (
 		"vendor/", "tests/testdata/", "build/",
 
 		// don't relicense vendored sources
+		"cmd/internal/browser",
 		"common/bitutil/bitutil",
 		"common/prque/",
+		"consensus/ethash/xor.go",
 		"crypto/blake2b/",
 		"crypto/bn256/",
 		"crypto/bls12381/",
@@ -76,7 +77,6 @@ var (
 		"log/",
 		"metrics/",
 		"signer/rules/deps",
-		"internal/reexec",
 
 		// skip special licenses
 		"crypto/secp256k1", // Relicensed to BSD-3 via https://github.com/ethereum/go-ethereum/pull/17225
@@ -151,6 +151,13 @@ func (i info) gpl() bool {
 	}
 	return false
 }
+
+// authors implements the sort.Interface for strings in case-insensitive mode.
+type authors []string
+
+func (as authors) Len() int           { return len(as) }
+func (as authors) Less(i, j int) bool { return strings.ToLower(as[i]) < strings.ToLower(as[j]) }
+func (as authors) Swap(i, j int)      { as[i], as[j] = as[j], as[i] }
 
 func main() {
 	var (
@@ -292,9 +299,7 @@ func writeAuthors(files []string) {
 		}
 	}
 	// Write sorted list of authors back to the file.
-	slices.SortFunc(list, func(a, b string) bool {
-		return strings.ToLower(a) < strings.ToLower(b)
-	})
+	sort.Sort(authors(list))
 	content := new(bytes.Buffer)
 	content.WriteString(authorsFileHeader)
 	for _, a := range list {

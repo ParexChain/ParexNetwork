@@ -18,7 +18,6 @@
 package msgrate
 
 import (
-	"context"
 	"errors"
 	"math"
 	"sort"
@@ -330,7 +329,7 @@ func (t *Trackers) MeanCapacities() map[uint64]float64 {
 // meanCapacities is the internal lockless version of MeanCapacities used for
 // debug logging.
 func (t *Trackers) meanCapacities() map[uint64]float64 {
-	capacities := make(map[uint64]float64, len(t.trackers))
+	capacities := make(map[uint64]float64)
 	for _, tt := range t.trackers {
 		tt.lock.RLock()
 		for key, val := range tt.capacity {
@@ -411,9 +410,7 @@ func (t *Trackers) tune() {
 
 	t.tuned = time.Now()
 	t.log.Debug("Recalculated msgrate QoS values", "rtt", t.roundtrip, "confidence", t.confidence, "ttl", t.targetTimeout(), "next", t.tuned.Add(t.roundtrip))
-	if t.log.Enabled(context.Background(), log.LevelTrace) {
-		t.log.Trace("Debug dump of mean capacities", "caps", t.meanCapacities())
-	}
+	t.log.Trace("Debug dump of mean capacities", "caps", log.Lazy{Fn: t.meanCapacities})
 }
 
 // detune reduces the tracker's confidence in order to make fresh measurements

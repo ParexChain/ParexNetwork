@@ -30,10 +30,8 @@ import (
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
-	lru "github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc"
-	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -43,6 +41,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/ethereum/go-ethereum/trie"
+	lru "github.com/hashicorp/golang-lru"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -144,11 +143,11 @@ var (
 type SignerFn func(signer accounts.Account, mimeType string, message []byte) ([]byte, error)
 
 // ecrecover extracts the Ethereum account address from a signed header.
-func ecrecover(header *types.Header, sigcache *sigLRU) (common.Address, error) {
+func ecrecover(header *types.Header, sigcache *lru.ARCCache) (common.Address, error) {
 	// If the signature's already cached, return that
 	hash := header.Hash()
 	if address, known := sigcache.Get(hash); known {
-		return address, nil
+		return address.(common.Address), nil
 	}
 	// Retrieve the signature from the header extra-data
 	if len(header.Extra) < extraSeal {
@@ -174,8 +173,8 @@ type Clique struct {
 	config *params.CliqueConfig // Consensus engine configuration parameters
 	db     ethdb.Database       // Database to store and retrieve snapshot checkpoints
 
-	recents    *lru.Cache[common.Hash, *Snapshot] // Snapshots for recent block to speed up reorgs
-	signatures *sigLRU                            // Signatures of recent blocks to speed up mining
+	recents    *lru.ARCCache // Snapshots for recent block to speed up reorgs
+	signatures *lru.ARCCache // Signatures of recent blocks to speed up mining
 
 	proposals map[common.Address]bool // Current list of proposals we are pushing
 
@@ -196,8 +195,8 @@ func New(config *params.CliqueConfig, db ethdb.Database) *Clique {
 		conf.Epoch = epochLength
 	}
 	// Allocate the snapshot caches and create the engine
-	recents := lru.NewCache[common.Hash, *Snapshot](inmemorySnapshots)
-	signatures := lru.NewCache[common.Hash, common.Address](inmemorySignatures)
+	recents, _ := lru.NewARC(inmemorySnapshots)
+	signatures, _ := lru.NewARC(inmemorySignatures)
 
 	return &Clique{
 		config:     &conf,
@@ -215,14 +214,14 @@ func (c *Clique) Author(header *types.Header) (common.Address, error) {
 }
 
 // VerifyHeader checks whether a header conforms to the consensus rules.
-func (c *Clique) VerifyHeader(chain consensus.ChainHeaderReader, header *types.Header) error {
+func (c *Clique) VerifyHeader(chain consensus.ChainHeaderReader, header *types.Header, seal bool) error {
 	return c.verifyHeader(chain, header, nil)
 }
 
 // VerifyHeaders is similar to VerifyHeader, but verifies a batch of headers. The
 // method returns a quit channel to abort the operations and a results channel to
 // retrieve the async verifications (the order is that of the input slice).
-func (c *Clique) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*types.Header) (chan<- struct{}, <-chan error) {
+func (c *Clique) VerifyHeaders(chain consensus.ChainHeaderReader, headers []*types.Header, seals []bool) (chan<- struct{}, <-chan error) {
 	abort := make(chan struct{})
 	results := make(chan error, len(headers))
 
@@ -299,24 +298,9 @@ func (c *Clique) verifyHeader(chain consensus.ChainHeaderReader, header *types.H
 	if header.GasLimit > params.MaxGasLimit {
 		return fmt.Errorf("invalid gasLimit: have %v, max %v", header.GasLimit, params.MaxGasLimit)
 	}
-	if chain.Config().IsShanghai(header.Number, header.Time) {
-		return errors.New("clique does not support shanghai fork")
-	}
-	// Verify the non-existence of withdrawalsHash.
-	if header.WithdrawalsHash != nil {
-		return fmt.Errorf("invalid withdrawalsHash: have %x, expected nil", header.WithdrawalsHash)
-	}
-	if chain.Config().IsCancun(header.Number, header.Time) {
-		return errors.New("clique does not support cancun fork")
-	}
-	// Verify the non-existence of cancun-specific header fields
-	switch {
-	case header.ExcessBlobGas != nil:
-		return fmt.Errorf("invalid excessBlobGas: have %d, expected nil", header.ExcessBlobGas)
-	case header.BlobGasUsed != nil:
-		return fmt.Errorf("invalid blobGasUsed: have %d, expected nil", header.BlobGasUsed)
-	case header.ParentBeaconRoot != nil:
-		return fmt.Errorf("invalid parentBeaconRoot, have %#x, expected nil", header.ParentBeaconRoot)
+	// If all checks passed, validate any special fields for hard forks
+	if err := misc.VerifyForkHashes(chain.Config(), header, false); err != nil {
+		return err
 	}
 	// All basic checks passed, verify cascading fields
 	return c.verifyCascadingFields(chain, header, parents)
@@ -357,7 +341,7 @@ func (c *Clique) verifyCascadingFields(chain consensus.ChainHeaderReader, header
 		if err := misc.VerifyGaslimit(parent.GasLimit, header.GasLimit); err != nil {
 			return err
 		}
-	} else if err := eip1559.VerifyEIP1559Header(chain.Config(), parent, header); err != nil {
+	} else if err := misc.VerifyEip1559Header(chain.Config(), parent, header); err != nil {
 		// Verify the header's EIP-1559 attributes.
 		return err
 	}
@@ -391,7 +375,7 @@ func (c *Clique) snapshot(chain consensus.ChainHeaderReader, number uint64, hash
 	for snap == nil {
 		// If an in-memory snapshot was found, use that
 		if s, ok := c.recents.Get(hash); ok {
-			snap = s
+			snap = s.(*Snapshot)
 			break
 		}
 		// If an on-disk checkpoint snapshot can be found, use that
@@ -578,25 +562,21 @@ func (c *Clique) Prepare(chain consensus.ChainHeaderReader, header *types.Header
 	return nil
 }
 
-// Finalize implements consensus.Engine. There is no post-transaction
-// consensus rules in clique, do nothing here.
-func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, withdrawals []*types.Withdrawal) {
-	// No block rewards in PoA, so the state remains as is
+// Finalize implements consensus.Engine, ensuring no uncles are set, nor block
+// rewards given.
+func (c *Clique) Finalize(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header) {
+	// No block rewards in PoA, so the state remains as is and uncles are dropped
+	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
+	header.UncleHash = types.CalcUncleHash(nil)
 }
 
 // FinalizeAndAssemble implements consensus.Engine, ensuring no uncles are set,
 // nor block rewards given, and returns the final block.
-func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt, withdrawals []*types.Withdrawal) (*types.Block, error) {
-	if len(withdrawals) > 0 {
-		return nil, errors.New("clique does not support withdrawals")
-	}
+func (c *Clique) FinalizeAndAssemble(chain consensus.ChainHeaderReader, header *types.Header, state *state.StateDB, txs []*types.Transaction, uncles []*types.Header, receipts []*types.Receipt) (*types.Block, error) {
 	// Finalize block
-	c.Finalize(chain, header, state, txs, uncles, nil)
+	c.Finalize(chain, header, state, txs, uncles)
 
-	// Assign the final state root to header.
-	header.Root = state.IntermediateRoot(chain.Config().IsEIP158(header.Number))
-
-	// Assemble and return the final block for sealing.
+	// Assemble and return the final block for sealing
 	return types.NewBlock(header, txs, nil, receipts, trie.NewStackTrie(nil)), nil
 }
 
@@ -762,18 +742,6 @@ func encodeSigHeader(w io.Writer, header *types.Header) {
 	}
 	if header.BaseFee != nil {
 		enc = append(enc, header.BaseFee)
-	}
-	if header.WithdrawalsHash != nil {
-		panic("unexpected withdrawal hash value in clique")
-	}
-	if header.ExcessBlobGas != nil {
-		panic("unexpected excess blob gas value in clique")
-	}
-	if header.BlobGasUsed != nil {
-		panic("unexpected blob gas used value in clique")
-	}
-	if header.ParentBeaconRoot != nil {
-		panic("unexpected parent beacon root value in clique")
 	}
 	if err := rlp.Encode(w, enc); err != nil {
 		panic("can't encode: " + err.Error())

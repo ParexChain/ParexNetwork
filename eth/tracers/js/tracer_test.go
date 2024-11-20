@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/holiman/uint256"
 )
 
 type account struct{}
@@ -38,9 +37,9 @@ func (account) SubBalance(amount *big.Int)                          {}
 func (account) AddBalance(amount *big.Int)                          {}
 func (account) SetAddress(common.Address)                           {}
 func (account) Value() *big.Int                                     { return nil }
-func (account) SetBalance(*uint256.Int)                             {}
+func (account) SetBalance(*big.Int)                                 {}
 func (account) SetNonce(uint64)                                     {}
-func (account) Balance() *uint256.Int                               { return nil }
+func (account) Balance() *big.Int                                   { return nil }
 func (account) Address() common.Address                             { return common.Address{} }
 func (account) SetCode(common.Hash, []byte)                         {}
 func (account) ForEachStorage(cb func(key, value common.Hash) bool) {}
@@ -49,8 +48,8 @@ type dummyStatedb struct {
 	state.StateDB
 }
 
-func (*dummyStatedb) GetRefund() uint64                           { return 1337 }
-func (*dummyStatedb) GetBalance(addr common.Address) *uint256.Int { return new(uint256.Int) }
+func (*dummyStatedb) GetRefund() uint64                       { return 1337 }
+func (*dummyStatedb) GetBalance(addr common.Address) *big.Int { return new(big.Int) }
 
 type vmContext struct {
 	blockCtx vm.BlockContext
@@ -63,10 +62,10 @@ func testCtx() *vmContext {
 
 func runTrace(tracer tracers.Tracer, vmctx *vmContext, chaincfg *params.ChainConfig, contractCode []byte) (json.RawMessage, error) {
 	var (
-		env             = vm.NewEVM(vmctx.blockCtx, vmctx.txCtx, &dummyStatedb{}, chaincfg, vm.Config{Tracer: tracer})
+		env             = vm.NewEVM(vmctx.blockCtx, vmctx.txCtx, &dummyStatedb{}, chaincfg, vm.Config{Debug: true, Tracer: tracer})
 		gasLimit uint64 = 31000
 		startGas uint64 = 10000
-		value           = uint256.NewInt(0)
+		value           = big.NewInt(0)
 		contract        = vm.NewContract(account{}, account{}, value, startGas)
 	)
 	contract.Code = []byte{byte(vm.PUSH1), 0x1, byte(vm.PUSH1), 0x1, 0x0}
@@ -75,11 +74,11 @@ func runTrace(tracer tracers.Tracer, vmctx *vmContext, chaincfg *params.ChainCon
 	}
 
 	tracer.CaptureTxStart(gasLimit)
-	tracer.CaptureStart(env, contract.Caller(), contract.Address(), false, []byte{}, startGas, value.ToBig())
+	tracer.CaptureStart(env, contract.Caller(), contract.Address(), false, []byte{}, startGas, value)
 	ret, err := env.Interpreter().Run(contract, []byte{}, false)
-	tracer.CaptureEnd(ret, startGas-contract.Gas, err)
+	tracer.CaptureEnd(ret, startGas-contract.Gas, 1, err)
 	// Rest gas assumes no refund
-	tracer.CaptureTxEnd(contract.Gas)
+	tracer.CaptureTxEnd(startGas - contract.Gas)
 	if err != nil {
 		return nil, err
 	}
@@ -108,15 +107,15 @@ func TestTracer(t *testing.T) {
 		{ // tests that we don't panic on bad arguments to memory access
 			code: "{depths: [], step: function(log) { this.depths.push(log.memory.slice(-1,-2)); }, fault: function() {}, result: function() { return this.depths; }}",
 			want: ``,
-			fail: "tracer accessed out of bound memory: offset -1, end -2 at step (<eval>:1:53(13))    in server-side tracer function 'step'",
+			fail: "tracer accessed out of bound memory: offset -1, end -2 at step (<eval>:1:53(15))    in server-side tracer function 'step'",
 		}, { // tests that we don't panic on bad arguments to stack peeks
 			code: "{depths: [], step: function(log) { this.depths.push(log.stack.peek(-1)); }, fault: function() {}, result: function() { return this.depths; }}",
 			want: ``,
-			fail: "tracer accessed out of bound stack: size 0, index -1 at step (<eval>:1:53(11))    in server-side tracer function 'step'",
+			fail: "tracer accessed out of bound stack: size 0, index -1 at step (<eval>:1:53(13))    in server-side tracer function 'step'",
 		}, { //  tests that we don't panic on bad arguments to memory getUint
 			code: "{ depths: [], step: function(log, db) { this.depths.push(log.memory.getUint(-64));}, fault: function() {}, result: function() { return this.depths; }}",
 			want: ``,
-			fail: "tracer accessed out of bound memory: available 0, offset -64, size 32 at step (<eval>:1:58(11))    in server-side tracer function 'step'",
+			fail: "tracer accessed out of bound memory: available 0, offset -64, size 32 at step (<eval>:1:58(13))    in server-side tracer function 'step'",
 		}, { // tests some general counting
 			code: "{count: 0, step: function() { this.count += 1; }, fault: function() {}, result: function() { return this.count; }}",
 			want: `3`,
@@ -129,9 +128,9 @@ func TestTracer(t *testing.T) {
 		}, { // tests to-string of opcodes
 			code: "{opcodes: [], step: function(log) { this.opcodes.push(log.op.toString()); }, fault: function() {}, result: function() { return this.opcodes; }}",
 			want: `["PUSH1","PUSH1","STOP"]`,
-		}, { // tests gasUsed
-			code: "{depths: [], step: function() {}, fault: function() {}, result: function(ctx) { return ctx.gasPrice+'.'+ctx.gasUsed; }}",
-			want: `"100000.21006"`,
+		}, { // tests intrinsic gas
+			code: "{depths: [], step: function() {}, fault: function() {}, result: function(ctx) { return ctx.gasPrice+'.'+ctx.gasUsed+'.'+ctx.intrinsicGas; }}",
+			want: `"100000.6.21000"`,
 		}, {
 			code: "{res: null, step: function(log) {}, fault: function() {}, result: function() { return toWord('0xffaa') }}",
 			want: `{"0":0,"1":0,"2":0,"3":0,"4":0,"5":0,"6":0,"7":0,"8":0,"9":0,"10":0,"11":0,"12":0,"13":0,"14":0,"15":0,"16":0,"17":0,"18":0,"19":0,"20":0,"21":0,"22":0,"23":0,"24":0,"25":0,"26":0,"27":0,"28":0,"29":0,"30":255,"31":170}`,
@@ -151,12 +150,12 @@ func TestTracer(t *testing.T) {
 		}, {
 			code:     "{res: [], step: function(log) { if (log.op.toString() === 'STOP') { this.res.push(log.memory.slice(5, 1025 * 1024)) } }, fault: function() {}, result: function() { return this.res }}",
 			want:     "",
-			fail:     "reached limit for padding memory slice: 1049568 at step (<eval>:1:83(20))    in server-side tracer function 'step'",
+			fail:     "tracer reached limit for padding memory slice: end 1049600, memorySize 32 at step (<eval>:1:83(23))    in server-side tracer function 'step'",
 			contract: []byte{byte(vm.PUSH1), byte(0xff), byte(vm.PUSH1), byte(0x00), byte(vm.MSTORE8), byte(vm.STOP)},
 		},
 	} {
 		if have, err := execTracer(tt.code, tt.contract); tt.want != string(have) || tt.fail != err {
-			t.Errorf("testcase %d: expected return value to be \n'%s'\n\tgot\n'%s'\nerror to be\n'%s'\n\tgot\n'%s'\n\tcode: %v", i, tt.want, string(have), tt.fail, err, tt.code)
+			t.Errorf("testcase %d: expected return value to be '%s' got '%s', error to be '%s' got '%s'\n\tcode: %v", i, tt.want, string(have), tt.fail, err, tt.code)
 		}
 	}
 }
@@ -181,9 +180,9 @@ func TestHaltBetweenSteps(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := vm.NewEVM(vm.BlockContext{BlockNumber: big.NewInt(1)}, vm.TxContext{GasPrice: big.NewInt(1)}, &dummyStatedb{}, params.TestChainConfig, vm.Config{Tracer: tracer})
+	env := vm.NewEVM(vm.BlockContext{BlockNumber: big.NewInt(1)}, vm.TxContext{GasPrice: big.NewInt(1)}, &dummyStatedb{}, params.TestChainConfig, vm.Config{Debug: true, Tracer: tracer})
 	scope := &vm.ScopeContext{
-		Contract: vm.NewContract(&account{}, &account{}, uint256.NewInt(0), 0),
+		Contract: vm.NewContract(&account{}, &account{}, big.NewInt(0), 0),
 	}
 	tracer.CaptureStart(env, common.Address{}, common.Address{}, false, []byte{}, 0, big.NewInt(0))
 	tracer.CaptureState(0, 0, 0, 0, scope, nil, 0, nil)
@@ -205,9 +204,9 @@ func TestNoStepExec(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		env := vm.NewEVM(vm.BlockContext{BlockNumber: big.NewInt(1)}, vm.TxContext{GasPrice: big.NewInt(100)}, &dummyStatedb{}, params.TestChainConfig, vm.Config{Tracer: tracer})
+		env := vm.NewEVM(vm.BlockContext{BlockNumber: big.NewInt(1)}, vm.TxContext{GasPrice: big.NewInt(100)}, &dummyStatedb{}, params.TestChainConfig, vm.Config{Debug: true, Tracer: tracer})
 		tracer.CaptureStart(env, common.Address{}, common.Address{}, false, []byte{}, 1000, big.NewInt(0))
-		tracer.CaptureEnd(nil, 0, nil)
+		tracer.CaptureEnd(nil, 0, 1, nil)
 		ret, err := tracer.GetResult()
 		if err != nil {
 			t.Fatal(err)
@@ -230,7 +229,7 @@ func TestNoStepExec(t *testing.T) {
 }
 
 func TestIsPrecompile(t *testing.T) {
-	chaincfg := &params.ChainConfig{ChainID: big.NewInt(1), HomesteadBlock: big.NewInt(0), DAOForkBlock: nil, DAOForkSupport: false, EIP150Block: big.NewInt(0), EIP155Block: big.NewInt(0), EIP158Block: big.NewInt(0), ByzantiumBlock: big.NewInt(100), ConstantinopleBlock: big.NewInt(0), PetersburgBlock: big.NewInt(0), IstanbulBlock: big.NewInt(200), MuirGlacierBlock: big.NewInt(0), BerlinBlock: big.NewInt(300), LondonBlock: big.NewInt(0), TerminalTotalDifficulty: nil, Ethash: new(params.EthashConfig), Clique: nil}
+	chaincfg := &params.ChainConfig{ChainID: big.NewInt(1), HomesteadBlock: big.NewInt(0), DAOForkBlock: nil, DAOForkSupport: false, EIP150Block: big.NewInt(0), EIP150Hash: common.Hash{}, EIP155Block: big.NewInt(0), EIP158Block: big.NewInt(0), ByzantiumBlock: big.NewInt(100), ConstantinopleBlock: big.NewInt(0), PetersburgBlock: big.NewInt(0), IstanbulBlock: big.NewInt(200), MuirGlacierBlock: big.NewInt(0), BerlinBlock: big.NewInt(300), LondonBlock: big.NewInt(0), TerminalTotalDifficulty: nil, Ethash: new(params.EthashConfig), Clique: nil}
 	chaincfg.ByzantiumBlock = big.NewInt(100)
 	chaincfg.IstanbulBlock = big.NewInt(200)
 	chaincfg.BerlinBlock = big.NewInt(300)
@@ -274,7 +273,7 @@ func TestEnterExit(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := &vm.ScopeContext{
-		Contract: vm.NewContract(&account{}, &account{}, uint256.NewInt(0), 0),
+		Contract: vm.NewContract(&account{}, &account{}, big.NewInt(0), 0),
 	}
 	tracer.CaptureEnter(vm.CALL, scope.Contract.Caller(), scope.Contract.Address(), []byte{}, 1000, new(big.Int))
 	tracer.CaptureExit([]byte{}, 400, nil)

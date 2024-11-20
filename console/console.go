@@ -34,7 +34,6 @@ import (
 	"github.com/ethereum/go-ethereum/internal/jsre"
 	"github.com/ethereum/go-ethereum/internal/jsre/deps"
 	"github.com/ethereum/go-ethereum/internal/web3ext"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/mattn/go-colorable"
 	"github.com/peterh/liner"
@@ -199,23 +198,14 @@ func (c *Console) initWeb3(bridge *bridge) error {
 	return err
 }
 
-var defaultAPIs = map[string]string{"eth": "1.0", "net": "1.0", "debug": "1.0"}
-
 // initExtensions loads and registers web3.js extensions.
 func (c *Console) initExtensions() error {
-	const methodNotFound = -32601
+	// Compute aliases from server-provided modules.
 	apis, err := c.client.SupportedModules()
 	if err != nil {
-		if rpcErr, ok := err.(rpc.Error); ok && rpcErr.ErrorCode() == methodNotFound {
-			log.Warn("Server does not support method rpc_modules, using default API list.")
-			apis = defaultAPIs
-		} else {
-			return err
-		}
+		return fmt.Errorf("api modules: %v", err)
 	}
-
-	// Compute aliases from server-provided modules.
-	aliases := map[string]struct{}{"eth": {}}
+	aliases := map[string]struct{}{"eth": {}, "personal": {}}
 	for api := range apis {
 		if api == "web3" {
 			continue
@@ -260,7 +250,6 @@ func (c *Console) initPersonal(vm *goja.Runtime, bridge *bridge) {
 	if personal == nil || c.prompter == nil {
 		return
 	}
-	log.Warn("Enabling deprecated personal namespace")
 	jeth := vm.NewObject()
 	vm.Set("jeth", jeth)
 	jeth.Set("openWallet", personal.Get("openWallet"))
@@ -306,8 +295,12 @@ func (c *Console) AutoCompleteInput(line string, pos int) (string, []string, str
 	start := pos - 1
 	for ; start > 0; start-- {
 		// Skip all methods and namespaces (i.e. including the dot)
-		c := line[start]
-		if c == '.' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '1' && c <= '9') {
+		if line[start] == '.' || (line[start] >= 'a' && line[start] <= 'z') || (line[start] >= 'A' && line[start] <= 'Z') {
+			continue
+		}
+		// Handle web3 in a special way (i.e. other numbers aren't auto completed)
+		if start >= 3 && line[start-3:start] == "web3" {
+			start -= 3
 			continue
 		}
 		// We've hit an unexpected character, autocomplete form here

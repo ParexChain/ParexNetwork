@@ -17,8 +17,9 @@
 package state
 
 import (
+	"math/big"
+
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/holiman/uint256"
 )
 
 // journalEntry is a modification entry in the state change journal that can be
@@ -89,26 +90,19 @@ type (
 		account *common.Address
 	}
 	resetObjectChange struct {
-		account      *common.Address
 		prev         *stateObject
 		prevdestruct bool
-		prevAccount  []byte
-		prevStorage  map[common.Hash][]byte
-
-		prevAccountOriginExist bool
-		prevAccountOrigin      []byte
-		prevStorageOrigin      map[common.Hash][]byte
 	}
-	selfDestructChange struct {
+	suicideChange struct {
 		account     *common.Address
-		prev        bool // whether account had already self-destructed
-		prevbalance *uint256.Int
+		prev        bool // whether account had already suicided
+		prevbalance *big.Int
 	}
 
 	// Changes to individual accounts.
 	balanceChange struct {
 		account *common.Address
-		prev    *uint256.Int
+		prev    *big.Int
 	}
 	nonceChange struct {
 		account *common.Address
@@ -144,11 +138,6 @@ type (
 		address *common.Address
 		slot    *common.Hash
 	}
-
-	transientStorageChange struct {
-		account       *common.Address
-		key, prevalue common.Hash
-	}
 )
 
 func (ch createObjectChange) revert(s *StateDB) {
@@ -162,36 +151,24 @@ func (ch createObjectChange) dirtied() *common.Address {
 
 func (ch resetObjectChange) revert(s *StateDB) {
 	s.setStateObject(ch.prev)
-	if !ch.prevdestruct {
-		delete(s.stateObjectsDestruct, ch.prev.address)
-	}
-	if ch.prevAccount != nil {
-		s.accounts[ch.prev.addrHash] = ch.prevAccount
-	}
-	if ch.prevStorage != nil {
-		s.storages[ch.prev.addrHash] = ch.prevStorage
-	}
-	if ch.prevAccountOriginExist {
-		s.accountsOrigin[ch.prev.address] = ch.prevAccountOrigin
-	}
-	if ch.prevStorageOrigin != nil {
-		s.storagesOrigin[ch.prev.address] = ch.prevStorageOrigin
+	if !ch.prevdestruct && s.snap != nil {
+		delete(s.snapDestructs, ch.prev.addrHash)
 	}
 }
 
 func (ch resetObjectChange) dirtied() *common.Address {
-	return ch.account
+	return nil
 }
 
-func (ch selfDestructChange) revert(s *StateDB) {
+func (ch suicideChange) revert(s *StateDB) {
 	obj := s.getStateObject(*ch.account)
 	if obj != nil {
-		obj.selfDestructed = ch.prev
+		obj.suicided = ch.prev
 		obj.setBalance(ch.prevbalance)
 	}
 }
 
-func (ch selfDestructChange) dirtied() *common.Address {
+func (ch suicideChange) dirtied() *common.Address {
 	return ch.account
 }
 
@@ -234,14 +211,6 @@ func (ch storageChange) revert(s *StateDB) {
 
 func (ch storageChange) dirtied() *common.Address {
 	return ch.account
-}
-
-func (ch transientStorageChange) revert(s *StateDB) {
-	s.setTransientState(*ch.account, ch.key, ch.prevalue)
-}
-
-func (ch transientStorageChange) dirtied() *common.Address {
-	return nil
 }
 
 func (ch refundChange) revert(s *StateDB) {

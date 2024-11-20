@@ -17,7 +17,7 @@
 package enode
 
 import (
-	"crypto/rand"
+	"math/rand"
 	"net"
 	"testing"
 

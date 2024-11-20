@@ -25,7 +25,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/forkid"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/params"
@@ -60,7 +59,7 @@ var (
 
 func nodesetInfo(ctx *cli.Context) error {
 	if ctx.NArg() < 1 {
-		return errors.New("need nodes file as argument")
+		return fmt.Errorf("need nodes file as argument")
 	}
 
 	ns := loadNodesJSON(ctx.Args().First())
@@ -99,7 +98,7 @@ func showAttributeCounts(ns nodeSet) {
 
 func nodesetFilter(ctx *cli.Context) error {
 	if ctx.NArg() < 1 {
-		return errors.New("need nodes file as argument")
+		return fmt.Errorf("need nodes file as argument")
 	}
 	// Parse -limit.
 	limit, err := parseFilterLimit(ctx.Args().Tail())
@@ -229,13 +228,15 @@ func ethFilter(args []string) (nodeFilter, error) {
 	var filter forkid.Filter
 	switch args[0] {
 	case "mainnet":
-		filter = forkid.NewStaticFilter(params.MainnetChainConfig, core.DefaultGenesisBlock().ToBlock())
+		filter = forkid.NewStaticFilter(params.MainnetChainConfig, params.MainnetGenesisHash)
+	case "rinkeby":
+		filter = forkid.NewStaticFilter(params.RinkebyChainConfig, params.RinkebyGenesisHash)
 	case "goerli":
-		filter = forkid.NewStaticFilter(params.GoerliChainConfig, core.DefaultGoerliGenesisBlock().ToBlock())
+		filter = forkid.NewStaticFilter(params.GoerliChainConfig, params.GoerliGenesisHash)
+	case "ropsten":
+		filter = forkid.NewStaticFilter(params.RopstenChainConfig, params.RopstenGenesisHash)
 	case "sepolia":
-		filter = forkid.NewStaticFilter(params.SepoliaChainConfig, core.DefaultSepoliaGenesisBlock().ToBlock())
-	case "holesky":
-		filter = forkid.NewStaticFilter(params.HoleskyChainConfig, core.DefaultHoleskyGenesisBlock().ToBlock())
+		filter = forkid.NewStaticFilter(params.SepoliaChainConfig, params.SepoliaGenesisHash)
 	default:
 		return nil, fmt.Errorf("unknown network %q", args[0])
 	}

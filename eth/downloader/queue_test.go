@@ -20,7 +20,6 @@ import (
 	"fmt"
 	"math/big"
 	"math/rand"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -32,7 +31,6 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/ethereum/go-ethereum/trie"
-	"golang.org/x/exp/slog"
 )
 
 // makeChain creates a chain of n blocks starting at and including parent.
@@ -44,7 +42,7 @@ func makeChain(n int, seed byte, parent *types.Block, empty bool) ([]*types.Bloc
 		block.SetCoinbase(common.Address{seed})
 		// Add one tx to every secondblock
 		if !empty && i%2 == 0 {
-			signer := types.MakeSigner(params.TestChainConfig, block.Number(), block.Timestamp())
+			signer := types.MakeSigner(params.TestChainConfig, block.Number())
 			tx, err := types.SignTx(types.NewTransaction(block.TxNonce(testAddress), common.Address{seed}, big.NewInt(1000), params.TxGas, block.BaseFee(), nil), signer, testKey)
 			if err != nil {
 				panic(err)
@@ -273,7 +271,7 @@ func XTestDelivery(t *testing.T) {
 	world.chain = blo
 	world.progress(10)
 	if false {
-		log.SetDefault(log.NewLogger(slog.NewTextHandler(os.Stdout, nil)))
+		log.Root().SetHandler(log.StdoutHandler)
 	}
 	q := newQueue(10, 10)
 	var wg sync.WaitGroup
@@ -341,7 +339,7 @@ func XTestDelivery(t *testing.T) {
 					uncleHashes[i] = types.CalcUncleHash(uncles)
 				}
 				time.Sleep(100 * time.Millisecond)
-				_, err := q.DeliverBodies(peer.id, txset, txsHashes, uncleset, uncleHashes, nil, nil)
+				_, err := q.DeliverBodies(peer.id, txset, txsHashes, uncleset, uncleHashes)
 				if err != nil {
 					fmt.Printf("delivered %d bodies %v\n", len(txset), err)
 				}

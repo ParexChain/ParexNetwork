@@ -21,19 +21,19 @@ import (
 	"encoding/json"
 	"math/big"
 	"sync/atomic"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/tracers"
-	"github.com/ethereum/go-ethereum/log"
 )
 
 //go:generate go run github.com/fjl/gencodec -type account -field-override accountMarshaling -out gen_account_json.go
 
 func init() {
-	tracers.DefaultDirectory.Register("prestateTracer", newPrestateTracer, false)
+	register("prestateTracer", newPrestateTracer)
 }
 
 type state = map[common.Address]*account
@@ -46,7 +46,7 @@ type account struct {
 }
 
 func (a *account) exists() bool {
-	return a.Nonce > 0 || len(a.Code) > 0 || len(a.Storage) > 0 || (a.Balance != nil && a.Balance.Sign() != 0)
+	return a.Balance.Sign() != 0 || a.Nonce > 0 || len(a.Code) > 0 || len(a.Storage) > 0
 }
 
 type accountMarshaling struct {
@@ -55,7 +55,6 @@ type accountMarshaling struct {
 }
 
 type prestateTracer struct {
-	noopTracer
 	env       *vm.EVM
 	pre       state
 	post      state
@@ -63,17 +62,19 @@ type prestateTracer struct {
 	to        common.Address
 	gasLimit  uint64 // Amount of gas bought for the whole tx
 	config    prestateTracerConfig
-	interrupt atomic.Bool // Atomic flag to signal execution interruption
-	reason    error       // Textual reason for the interruption
+	interrupt uint32 // Atomic flag to signal execution interruption
+	reason    error  // Textual reason for the interruption
 	created   map[common.Address]bool
 	deleted   map[common.Address]bool
 }
 
 type prestateTracerConfig struct {
-	DiffMode bool `json:"diffMode"` // If true, this tracer will return state modifications
+	DiffMode bool `json:"diffMode"` // If true, this tracer will return all diff states
 }
 
 func newPrestateTracer(ctx *tracers.Context, cfg json.RawMessage) (tracers.Tracer, error) {
+	// First callframe contains tx context info
+	// and is populated on start and end.
 	var config prestateTracerConfig
 	if cfg != nil {
 		if err := json.Unmarshal(cfg, &config); err != nil {
@@ -118,7 +119,7 @@ func (t *prestateTracer) CaptureStart(env *vm.EVM, from common.Address, to commo
 }
 
 // CaptureEnd is called after the call finishes to finalize the tracing.
-func (t *prestateTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
+func (t *prestateTracer) CaptureEnd(output []byte, gasUsed uint64, _ time.Duration, err error) {
 	if t.config.DiffMode {
 		return
 	}
@@ -134,13 +135,6 @@ func (t *prestateTracer) CaptureEnd(output []byte, gasUsed uint64, err error) {
 
 // CaptureState implements the EVMLogger interface to trace a single step of VM execution.
 func (t *prestateTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64, scope *vm.ScopeContext, rData []byte, depth int, err error) {
-	if err != nil {
-		return
-	}
-	// Skip if tracing was interrupted
-	if t.interrupt.Load() {
-		return
-	}
 	stack := scope.Stack
 	stackData := stack.Data()
 	stackLen := len(stackData)
@@ -166,17 +160,26 @@ func (t *prestateTracer) CaptureState(pc uint64, op vm.OpCode, gas, cost uint64,
 	case stackLen >= 4 && op == vm.CREATE2:
 		offset := stackData[stackLen-2]
 		size := stackData[stackLen-3]
-		init, err := tracers.GetMemoryCopyPadded(scope.Memory, int64(offset.Uint64()), int64(size.Uint64()))
-		if err != nil {
-			log.Warn("failed to copy CREATE2 input", "err", err, "tracer", "prestateTracer", "offset", offset, "size", size)
-			return
-		}
+		init := scope.Memory.GetCopy(int64(offset.Uint64()), int64(size.Uint64()))
 		inithash := crypto.Keccak256(init)
 		salt := stackData[stackLen-4]
 		addr := crypto.CreateAddress2(caller, salt.Bytes32(), inithash)
 		t.lookupAccount(addr)
 		t.created[addr] = true
 	}
+}
+
+// CaptureFault implements the EVMLogger interface to trace an execution fault.
+func (t *prestateTracer) CaptureFault(pc uint64, op vm.OpCode, gas, cost uint64, _ *vm.ScopeContext, depth int, err error) {
+}
+
+// CaptureEnter is called when EVM enters a new scope (via call, create or selfdestruct).
+func (t *prestateTracer) CaptureEnter(typ vm.OpCode, from common.Address, to common.Address, input []byte, gas uint64, value *big.Int) {
+}
+
+// CaptureExit is called when EVM exits a scope, even if the scope didn't
+// execute any code.
+func (t *prestateTracer) CaptureExit(output []byte, gasUsed uint64, err error) {
 }
 
 func (t *prestateTracer) CaptureTxStart(gasLimit uint64) {
@@ -189,13 +192,13 @@ func (t *prestateTracer) CaptureTxEnd(restGas uint64) {
 	}
 
 	for addr, state := range t.pre {
-		// The deleted account's state is pruned from `post` but kept in `pre`
+		// the deleted account's state is pruned
 		if _, ok := t.deleted[addr]; ok {
 			continue
 		}
 		modified := false
 		postAccount := &account{Storage: make(map[common.Hash]common.Hash)}
-		newBalance := t.env.StateDB.GetBalance(addr).ToBig()
+		newBalance := t.env.StateDB.GetBalance(addr)
 		newNonce := t.env.StateDB.GetNonce(addr)
 		newCode := t.env.StateDB.GetCode(addr)
 
@@ -219,10 +222,7 @@ func (t *prestateTracer) CaptureTxEnd(restGas uint64) {
 			}
 
 			newVal := t.env.StateDB.GetState(addr, key)
-			if val == newVal {
-				// Omit unchanged slots
-				delete(t.pre[addr].Storage, key)
-			} else {
+			if val != newVal {
 				modified = true
 				if newVal != (common.Hash{}) {
 					postAccount.Storage[key] = newVal
@@ -268,7 +268,7 @@ func (t *prestateTracer) GetResult() (json.RawMessage, error) {
 // Stop terminates execution of the tracer at the first opportune moment.
 func (t *prestateTracer) Stop(err error) {
 	t.reason = err
-	t.interrupt.Store(true)
+	atomic.StoreUint32(&t.interrupt, 1)
 }
 
 // lookupAccount fetches details of an account and adds it to the prestate
@@ -279,7 +279,7 @@ func (t *prestateTracer) lookupAccount(addr common.Address) {
 	}
 
 	t.pre[addr] = &account{
-		Balance: t.env.StateDB.GetBalance(addr).ToBig(),
+		Balance: t.env.StateDB.GetBalance(addr),
 		Nonce:   t.env.StateDB.GetNonce(addr),
 		Code:    t.env.StateDB.GetCode(addr),
 		Storage: make(map[common.Hash]common.Hash),

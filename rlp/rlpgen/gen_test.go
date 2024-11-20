@@ -47,7 +47,7 @@ func init() {
 	}
 }
 
-var tests = []string{"uints", "nil", "rawvalue", "optional", "bigint", "uint256"}
+var tests = []string{"uints", "nil", "rawvalue", "optional", "bigint"}
 
 func TestOutput(t *testing.T) {
 	for _, test := range tests {
@@ -75,7 +75,7 @@ func TestOutput(t *testing.T) {
 				t.Fatal("error loading expected test output:", err)
 			}
 			if !bytes.Equal(output, wantOutput) {
-				t.Fatalf("output mismatch, want: %v got %v", string(wantOutput), string(output))
+				t.Fatal("output mismatch:\n", string(output))
 			}
 		})
 	}

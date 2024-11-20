@@ -14,6 +14,9 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
+//go:build gofuzz
+// +build gofuzz
+
 package bn256
 
 import (
@@ -61,8 +64,8 @@ func getG2Points(input io.Reader) (*cloudflare.G2, *google.G2, *bn254.G2Affine) 
 	return xc, xg, xs
 }
 
-// fuzzAdd fuzzez bn256 addition between the Google and Cloudflare libraries.
-func fuzzAdd(data []byte) int {
+// FuzzAdd fuzzez bn256 addition between the Google and Cloudflare libraries.
+func FuzzAdd(data []byte) int {
 	input := bytes.NewReader(data)
 	xc, xg, xs := getG1Points(input)
 	if xc == nil {
@@ -94,9 +97,9 @@ func fuzzAdd(data []byte) int {
 	return 1
 }
 
-// fuzzMul fuzzez bn256 scalar multiplication between the Google and Cloudflare
+// FuzzMul fuzzez bn256 scalar multiplication between the Google and Cloudflare
 // libraries.
-func fuzzMul(data []byte) int {
+func FuzzMul(data []byte) int {
 	input := bytes.NewReader(data)
 	pc, pg, ps := getG1Points(input)
 	if pc == nil {
@@ -136,7 +139,7 @@ func fuzzMul(data []byte) int {
 	return 1
 }
 
-func fuzzPair(data []byte) int {
+func FuzzPair(data []byte) int {
 	input := bytes.NewReader(data)
 	pc, pg, ps := getG1Points(input)
 	if pc == nil {
@@ -153,29 +156,12 @@ func fuzzPair(data []byte) int {
 	if !bytes.Equal(clPair, gPair) {
 		panic("pairing mismatch: cloudflare/google")
 	}
+
 	cPair, err := bn254.Pair([]bn254.G1Affine{*ps}, []bn254.G2Affine{*ts})
 	if err != nil {
 		panic(fmt.Sprintf("gnark/bn254 encountered error: %v", err))
 	}
-
-	// gnark uses a different pairing algorithm which might produce
-	// different but also correct outputs, we need to scale the output by s
-
-	u, _ := new(big.Int).SetString("0x44e992b44a6909f1", 0)
-	u_exp2 := new(big.Int).Exp(u, big.NewInt(2), nil)   // u^2
-	u_6_exp2 := new(big.Int).Mul(big.NewInt(6), u_exp2) // 6*u^2
-	u_3 := new(big.Int).Mul(big.NewInt(3), u)           // 3*u
-	inner := u_6_exp2.Add(u_6_exp2, u_3)                // 6*u^2 + 3*u
-	inner.Add(inner, big.NewInt(1))                     // 6*u^2 + 3*u + 1
-	u_2 := new(big.Int).Mul(big.NewInt(2), u)           // 2*u
-	s := u_2.Mul(u_2, inner)                            // 2*u(6*u^2 + 3*u + 1)
-
-	gRes := new(bn254.GT)
-	if err := gRes.SetBytes(clPair); err != nil {
-		panic(err)
-	}
-	gRes = gRes.Exp(*gRes, s)
-	if !bytes.Equal(cPair.Marshal(), gRes.Marshal()) {
+	if !bytes.Equal(clPair, cPair.Marshal()) {
 		panic("pairing mismatch: cloudflare/gnark")
 	}
 

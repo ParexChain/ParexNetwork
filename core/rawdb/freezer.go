@@ -30,7 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
-	"github.com/gofrs/flock"
+	"github.com/prometheus/tsdb/fileutil"
 )
 
 var (
@@ -62,8 +62,11 @@ const freezerTableSize = 2 * 1000 * 1000 * 1000
 //     reserving it for go-ethereum. This would also reduce the memory requirements
 //     of Geth, and thus also GC overhead.
 type Freezer struct {
-	frozen atomic.Uint64 // Number of blocks already frozen
-	tail   atomic.Uint64 // Number of the first stored item in the freezer
+	// WARNING: The `frozen` and `tail` fields are accessed atomically. On 32 bit platforms, only
+	// 64-bit aligned fields can be atomic. The struct is guaranteed to be so aligned,
+	// so take advantage of that (https://golang.org/pkg/sync/atomic/#pkg-note-BUG).
+	frozen uint64 // Number of blocks already frozen
+	tail   uint64 // Number of the first stored item in the freezer
 
 	// This lock synchronizes writers and the truncate operation, as well as
 	// the "atomic" (batched) read operations.
@@ -72,14 +75,8 @@ type Freezer struct {
 
 	readonly     bool
 	tables       map[string]*freezerTable // Data tables for storing everything
-	instanceLock *flock.Flock             // File-system lock to prevent double opens
+	instanceLock fileutil.Releaser        // File-system lock to prevent double opens
 	closeOnce    sync.Once
-}
-
-// NewChainFreezer is a small utility method around NewFreezer that sets the
-// default parameters for the chain storage.
-func NewChainFreezer(datadir string, namespace string, readonly bool) (*Freezer, error) {
-	return NewFreezer(datadir, namespace, readonly, freezerTableSize, chainFreezerNoSnappy)
 }
 
 // NewFreezer creates a freezer instance for maintaining immutable ordered
@@ -101,21 +98,11 @@ func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize ui
 			return nil, errSymlinkDatadir
 		}
 	}
-	flockFile := filepath.Join(datadir, "FLOCK")
-	if err := os.MkdirAll(filepath.Dir(flockFile), 0755); err != nil {
-		return nil, err
-	}
 	// Leveldb uses LOCK as the filelock filename. To prevent the
 	// name collision, we use FLOCK as the lock name.
-	lock := flock.New(flockFile)
-	tryLock := lock.TryLock
-	if readonly {
-		tryLock = lock.TryRLock
-	}
-	if locked, err := tryLock(); err != nil {
+	lock, _, err := fileutil.Flock(filepath.Join(datadir, "FLOCK"))
+	if err != nil {
 		return nil, err
-	} else if !locked {
-		return nil, errors.New("locking failed")
 	}
 	// Open all the supported data tables
 	freezer := &Freezer{
@@ -131,12 +118,12 @@ func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize ui
 			for _, table := range freezer.tables {
 				table.Close()
 			}
-			lock.Unlock()
+			lock.Release()
 			return nil, err
 		}
 		freezer.tables[name] = table
 	}
-	var err error
+
 	if freezer.readonly {
 		// In readonly mode only validate, don't truncate.
 		// validate also sets `freezer.frozen`.
@@ -149,7 +136,7 @@ func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize ui
 		for _, table := range freezer.tables {
 			table.Close()
 		}
-		lock.Unlock()
+		lock.Release()
 		return nil, err
 	}
 
@@ -172,7 +159,7 @@ func (f *Freezer) Close() error {
 				errs = append(errs, err)
 			}
 		}
-		if err := f.instanceLock.Unlock(); err != nil {
+		if err := f.instanceLock.Release(); err != nil {
 			errs = append(errs, err)
 		}
 	})
@@ -201,10 +188,9 @@ func (f *Freezer) Ancient(kind string, number uint64) ([]byte, error) {
 
 // AncientRange retrieves multiple items in sequence, starting from the index 'start'.
 // It will return
-//   - at most 'count' items,
-//   - if maxBytes is specified: at least 1 item (even if exceeding the maxByteSize),
-//     but will otherwise return as many items as fit into maxByteSize.
-//   - if maxBytes is not specified, 'count' items will be returned if they are present.
+//   - at most 'max' items,
+//   - at least 1 item (even if exceeding the maxByteSize), but will otherwise
+//     return as many items as fit into maxByteSize.
 func (f *Freezer) AncientRange(kind string, start, count, maxBytes uint64) ([][]byte, error) {
 	if table := f.tables[kind]; table != nil {
 		return table.RetrieveItems(start, count, maxBytes)
@@ -214,12 +200,12 @@ func (f *Freezer) AncientRange(kind string, start, count, maxBytes uint64) ([][]
 
 // Ancients returns the length of the frozen items.
 func (f *Freezer) Ancients() (uint64, error) {
-	return f.frozen.Load(), nil
+	return atomic.LoadUint64(&f.frozen), nil
 }
 
 // Tail returns the number of first stored item in the freezer.
 func (f *Freezer) Tail() (uint64, error) {
-	return f.tail.Load(), nil
+	return atomic.LoadUint64(&f.tail), nil
 }
 
 // AncientSize returns the ancient size of the specified category.
@@ -253,7 +239,7 @@ func (f *Freezer) ModifyAncients(fn func(ethdb.AncientWriteOp) error) (writeSize
 	defer f.writeLock.Unlock()
 
 	// Roll back all tables to the starting position in case of error.
-	prevItem := f.frozen.Load()
+	prevItem := atomic.LoadUint64(&f.frozen)
 	defer func() {
 		if err != nil {
 			// The write operation has failed. Go back to the previous item position.
@@ -274,51 +260,48 @@ func (f *Freezer) ModifyAncients(fn func(ethdb.AncientWriteOp) error) (writeSize
 	if err != nil {
 		return 0, err
 	}
-	f.frozen.Store(item)
+	atomic.StoreUint64(&f.frozen, item)
 	return writeSize, nil
 }
 
 // TruncateHead discards any recent data above the provided threshold number.
-// It returns the previous head number.
-func (f *Freezer) TruncateHead(items uint64) (uint64, error) {
+func (f *Freezer) TruncateHead(items uint64) error {
 	if f.readonly {
-		return 0, errReadOnly
+		return errReadOnly
 	}
 	f.writeLock.Lock()
 	defer f.writeLock.Unlock()
 
-	oitems := f.frozen.Load()
-	if oitems <= items {
-		return oitems, nil
+	if atomic.LoadUint64(&f.frozen) <= items {
+		return nil
 	}
 	for _, table := range f.tables {
 		if err := table.truncateHead(items); err != nil {
-			return 0, err
+			return err
 		}
 	}
-	f.frozen.Store(items)
-	return oitems, nil
+	atomic.StoreUint64(&f.frozen, items)
+	return nil
 }
 
 // TruncateTail discards any recent data below the provided threshold number.
-func (f *Freezer) TruncateTail(tail uint64) (uint64, error) {
+func (f *Freezer) TruncateTail(tail uint64) error {
 	if f.readonly {
-		return 0, errReadOnly
+		return errReadOnly
 	}
 	f.writeLock.Lock()
 	defer f.writeLock.Unlock()
 
-	old := f.tail.Load()
-	if old >= tail {
-		return old, nil
+	if atomic.LoadUint64(&f.tail) >= tail {
+		return nil
 	}
 	for _, table := range f.tables {
 		if err := table.truncateTail(tail); err != nil {
-			return 0, err
+			return err
 		}
 	}
-	f.tail.Store(tail)
-	return old, nil
+	atomic.StoreUint64(&f.tail, tail)
+	return nil
 }
 
 // Sync flushes all data tables to disk.
@@ -335,35 +318,30 @@ func (f *Freezer) Sync() error {
 	return nil
 }
 
-// validate checks that every table has the same boundary.
+// validate checks that every table has the same length.
 // Used instead of `repair` in readonly mode.
 func (f *Freezer) validate() error {
 	if len(f.tables) == 0 {
 		return nil
 	}
 	var (
-		head uint64
-		tail uint64
-		name string
+		length uint64
+		name   string
 	)
-	// Hack to get boundary of any table
+	// Hack to get length of any table
 	for kind, table := range f.tables {
-		head = table.items.Load()
-		tail = table.itemHidden.Load()
+		length = atomic.LoadUint64(&table.items)
 		name = kind
 		break
 	}
-	// Now check every table against those boundaries.
+	// Now check every table against that length
 	for kind, table := range f.tables {
-		if head != table.items.Load() {
-			return fmt.Errorf("freezer tables %s and %s have differing head: %d != %d", kind, name, table.items.Load(), head)
-		}
-		if tail != table.itemHidden.Load() {
-			return fmt.Errorf("freezer tables %s and %s have differing tail: %d != %d", kind, name, table.itemHidden.Load(), tail)
+		items := atomic.LoadUint64(&table.items)
+		if length != items {
+			return fmt.Errorf("freezer tables %s and %s have differing lengths: %d != %d", kind, name, items, length)
 		}
 	}
-	f.frozen.Store(head)
-	f.tail.Store(tail)
+	atomic.StoreUint64(&f.frozen, length)
 	return nil
 }
 
@@ -374,11 +352,11 @@ func (f *Freezer) repair() error {
 		tail = uint64(0)
 	)
 	for _, table := range f.tables {
-		items := table.items.Load()
+		items := atomic.LoadUint64(&table.items)
 		if head > items {
 			head = items
 		}
-		hidden := table.itemHidden.Load()
+		hidden := atomic.LoadUint64(&table.itemHidden)
 		if hidden > tail {
 			tail = hidden
 		}
@@ -391,8 +369,8 @@ func (f *Freezer) repair() error {
 			return err
 		}
 	}
-	f.frozen.Store(head)
-	f.tail.Store(tail)
+	atomic.StoreUint64(&f.frozen, head)
+	atomic.StoreUint64(&f.tail, tail)
 	return nil
 }
 
@@ -418,7 +396,7 @@ func (f *Freezer) MigrateTable(kind string, convert convertLegacyFn) error {
 	// and that error will be returned.
 	forEach := func(t *freezerTable, offset uint64, fn func(uint64, []byte) error) error {
 		var (
-			items     = t.items.Load()
+			items     = atomic.LoadUint64(&t.items)
 			batchSize = uint64(1024)
 			maxBytes  = uint64(1024 * 1024)
 		)
@@ -441,8 +419,8 @@ func (f *Freezer) MigrateTable(kind string, convert convertLegacyFn) error {
 	}
 	// TODO(s1na): This is a sanity-check since as of now no process does tail-deletion. But the migration
 	// process assumes no deletion at tail and needs to be modified to account for that.
-	if table.itemOffset.Load() > 0 || table.itemHidden.Load() > 0 {
-		return errors.New("migration not supported for tail-deleted freezers")
+	if table.itemOffset > 0 || table.itemHidden > 0 {
+		return fmt.Errorf("migration not supported for tail-deleted freezers")
 	}
 	ancientsPath := filepath.Dir(table.index.Name())
 	// Set up new dir for the migrated table, the content of which
@@ -457,7 +435,7 @@ func (f *Freezer) MigrateTable(kind string, convert convertLegacyFn) error {
 		out    []byte
 		start  = time.Now()
 		logged = time.Now()
-		offset = newTable.items.Load()
+		offset = newTable.items
 	)
 	if offset > 0 {
 		log.Info("found previous migration attempt", "migrated", offset)

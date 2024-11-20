@@ -14,6 +14,9 @@
 // You should have received a copy of the GNU Lesser General Public License
 // along with the go-ethereum library. If not, see <http://www.gnu.org/licenses/>.
 
+//go:build go1.5
+// +build go1.5
+
 package debug
 
 import (
@@ -45,7 +48,7 @@ func (h *HandlerT) StartGoTrace(file string) error {
 	return nil
 }
 
-// StopGoTrace stops an ongoing trace.
+// StopTrace stops an ongoing trace.
 func (h *HandlerT) StopGoTrace() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -100,6 +100,7 @@ func TestSubscribeDuplicateType(t *testing.T) {
 }
 
 func TestMuxConcurrent(t *testing.T) {
+	rand.Seed(time.Now().Unix())
 	mux := new(TypeMux)
 	defer mux.Stop()
 

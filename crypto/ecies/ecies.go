@@ -40,8 +40,6 @@ import (
 	"hash"
 	"io"
 	"math/big"
-
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 var (
@@ -97,15 +95,15 @@ func ImportECDSA(prv *ecdsa.PrivateKey) *PrivateKey {
 // Generate an elliptic curve public / private keypair. If params is nil,
 // the recommended default parameters for the key will be chosen.
 func GenerateKey(rand io.Reader, curve elliptic.Curve, params *ECIESParams) (prv *PrivateKey, err error) {
-	sk, err := ecdsa.GenerateKey(curve, rand)
+	pb, x, y, err := elliptic.GenerateKey(curve, rand)
 	if err != nil {
 		return
 	}
 	prv = new(PrivateKey)
-	prv.PublicKey.X = sk.X
-	prv.PublicKey.Y = sk.Y
+	prv.PublicKey.X = x
+	prv.PublicKey.Y = y
 	prv.PublicKey.Curve = curve
-	prv.D = new(big.Int).Set(sk.D)
+	prv.D = new(big.Int).SetBytes(pb)
 	if params == nil {
 		params = ParamsFromCurve(curve)
 	}
@@ -257,15 +255,12 @@ func Encrypt(rand io.Reader, pub *PublicKey, m, s1, s2 []byte) (ct []byte, err e
 
 	d := messageTag(params.Hash, Km, em, s2)
 
-	if curve, ok := pub.Curve.(crypto.EllipticCurve); ok {
-		Rb := curve.Marshal(R.PublicKey.X, R.PublicKey.Y)
-		ct = make([]byte, len(Rb)+len(em)+len(d))
-		copy(ct, Rb)
-		copy(ct[len(Rb):], em)
-		copy(ct[len(Rb)+len(em):], d)
-		return ct, nil
-	}
-	return nil, ErrInvalidCurve
+	Rb := elliptic.Marshal(pub.Curve, R.PublicKey.X, R.PublicKey.Y)
+	ct = make([]byte, len(Rb)+len(em)+len(d))
+	copy(ct, Rb)
+	copy(ct[len(Rb):], em)
+	copy(ct[len(Rb)+len(em):], d)
+	return ct, nil
 }
 
 // Decrypt decrypts an ECIES ciphertext.
@@ -302,24 +297,21 @@ func (prv *PrivateKey) Decrypt(c, s1, s2 []byte) (m []byte, err error) {
 
 	R := new(PublicKey)
 	R.Curve = prv.PublicKey.Curve
-
-	if curve, ok := R.Curve.(crypto.EllipticCurve); ok {
-		R.X, R.Y = curve.Unmarshal(c[:rLen])
-		if R.X == nil {
-			return nil, ErrInvalidPublicKey
-		}
-
-		z, err := prv.GenerateShared(R, params.KeyLen, params.KeyLen)
-		if err != nil {
-			return nil, err
-		}
-		Ke, Km := deriveKeys(hash, z, s1, params.KeyLen)
-
-		d := messageTag(params.Hash, Km, c[mStart:mEnd], s2)
-		if subtle.ConstantTimeCompare(c[mEnd:], d) != 1 {
-			return nil, ErrInvalidMessage
-		}
-		return symDecrypt(params, Ke, c[mStart:mEnd])
+	R.X, R.Y = elliptic.Unmarshal(R.Curve, c[:rLen])
+	if R.X == nil {
+		return nil, ErrInvalidPublicKey
 	}
-	return nil, ErrInvalidCurve
+
+	z, err := prv.GenerateShared(R, params.KeyLen, params.KeyLen)
+	if err != nil {
+		return nil, err
+	}
+	Ke, Km := deriveKeys(hash, z, s1, params.KeyLen)
+
+	d := messageTag(params.Hash, Km, c[mStart:mEnd], s2)
+	if subtle.ConstantTimeCompare(c[mEnd:], d) != 1 {
+		return nil, ErrInvalidMessage
+	}
+
+	return symDecrypt(params, Ke, c[mStart:mEnd])
 }

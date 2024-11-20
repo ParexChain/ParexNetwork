@@ -26,6 +26,6 @@ func WriteJSONOnce(r Registry, w io.Writer) {
 	json.NewEncoder(w).Encode(r)
 }
 
-func (r *PrefixedRegistry) MarshalJSON() ([]byte, error) {
-	return json.Marshal(r.GetAll())
+func (p *PrefixedRegistry) MarshalJSON() ([]byte, error) {
+	return json.Marshal(p.GetAll())
 }

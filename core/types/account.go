@@ -52,7 +52,7 @@ type accountMarshaling struct {
 }
 
 // storageJSON represents a 256 bit byte array, but allows less than 256 bits when
-// unmarshalling from hex.
+// unmarshaling from hex.
 type storageJSON common.Hash
 
 func (h *storageJSON) UnmarshalText(text []byte) error {

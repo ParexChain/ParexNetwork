@@ -19,6 +19,7 @@ package core
 import (
 	"sync/atomic"
 
+	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -30,14 +31,16 @@ import (
 // data from disk before the main block processor start executing.
 type statePrefetcher struct {
 	config *params.ChainConfig // Chain configuration options
-	chain  *HeaderChain        // Canonical block chain
+	bc     *BlockChain         // Canonical block chain
+	engine consensus.Engine    // Consensus engine used for block rewards
 }
 
 // newStatePrefetcher initialises a new statePrefetcher.
-func newStatePrefetcher(config *params.ChainConfig, chain *HeaderChain) *statePrefetcher {
+func newStatePrefetcher(config *params.ChainConfig, bc *BlockChain, engine consensus.Engine) *statePrefetcher {
 	return &statePrefetcher{
 		config: config,
-		chain:  chain,
+		bc:     bc,
+		engine: engine,
 	}
 }
 
@@ -48,7 +51,7 @@ func (p *statePrefetcher) Prefetch(block *types.Block, statedb *state.StateDB, c
 	var (
 		header       = block.Header()
 		gaspool      = new(GasPool).AddGas(block.GasLimit())
-		blockContext = NewEVMBlockContext(header, p.chain, nil)
+		blockContext = NewEVMBlockContext(header, p.bc, nil)
 		evm          = vm.NewEVM(blockContext, vm.TxContext{}, statedb, p.config, cfg)
 		signer       = types.MakeSigner(p.config, header.Number, header.Time)
 	)

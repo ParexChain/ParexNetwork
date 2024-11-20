@@ -115,7 +115,9 @@ func (c *BasicLRU[K, V]) Peek(key K) (value V, ok bool) {
 // Purge empties the cache.
 func (c *BasicLRU[K, V]) Purge() {
 	c.list.init()
-	clear(c.items)
+	for k := range c.items {
+		delete(c.items, k)
+	}
 }
 
 // Remove drops an item from the cache. Returns true if the key was present in cache.
@@ -172,7 +174,7 @@ func (l *list[T]) init() {
 	l.root.prev = &l.root
 }
 
-// pushElem adds an element to the front of the list.
+// push adds an element to the front of the list.
 func (l *list[T]) pushElem(e *listElem[T]) {
 	e.prev = &l.root
 	e.next = l.root.next

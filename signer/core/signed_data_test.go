@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"math/big"
 	"os"
-	"path/filepath"
+	"path"
 	"strings"
 	"testing"
 
@@ -385,7 +385,7 @@ func TestJsonFiles(t *testing.T) {
 			continue
 		}
 		expectedFailure := strings.HasPrefix(fInfo.Name(), "expfail")
-		data, err := os.ReadFile(filepath.Join("testdata", fInfo.Name()))
+		data, err := os.ReadFile(path.Join("testdata", fInfo.Name()))
 		if err != nil {
 			t.Errorf("Failed to read file %v: %v", fInfo.Name(), err)
 			continue
@@ -411,14 +411,14 @@ func TestJsonFiles(t *testing.T) {
 // crashes or hangs.
 func TestFuzzerFiles(t *testing.T) {
 	t.Parallel()
-	corpusdir := filepath.Join("testdata", "fuzzing")
+	corpusdir := path.Join("testdata", "fuzzing")
 	testfiles, err := os.ReadDir(corpusdir)
 	if err != nil {
 		t.Fatalf("failed reading files: %v", err)
 	}
 	verbose := false
 	for i, fInfo := range testfiles {
-		data, err := os.ReadFile(filepath.Join(corpusdir, fInfo.Name()))
+		data, err := os.ReadFile(path.Join(corpusdir, fInfo.Name()))
 		if err != nil {
 			t.Errorf("Failed to read file %v: %v", fInfo.Name(), err)
 			continue
@@ -671,7 +671,7 @@ func TestGnosisTypedDataWithChainId(t *testing.T) {
 	}
 }
 
-// TestGnosisCustomDataWithChainId tests the scenario where a user submits only the gnosis-safe
+// TestGnosisCustomData tests the scenario where a user submits only the gnosis-safe
 // specific data, and we fill the TypedData struct on our side
 func TestGnosisCustomDataWithChainId(t *testing.T) {
 	t.Parallel()

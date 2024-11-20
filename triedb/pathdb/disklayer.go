@@ -17,6 +17,7 @@
 package pathdb
 
 import (
+	"errors"
 	"fmt"
 	"sync"
 
@@ -27,6 +28,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/trie/triestate"
+	"golang.org/x/crypto/sha3"
 )
 
 // diskLayer is a low level persistent layer built on top of a key-value store.
@@ -57,7 +59,7 @@ func newDiskLayer(root common.Hash, id uint64, db *Database, cleans *fastcache.C
 	}
 }
 
-// rootHash implements the layer interface, returning root hash of corresponding state.
+// root implements the layer interface, returning root hash of corresponding state.
 func (dl *diskLayer) rootHash() common.Hash {
 	return dl.root
 }
@@ -67,7 +69,7 @@ func (dl *diskLayer) stateID() uint64 {
 	return dl.id
 }
 
-// parentLayer implements the layer interface, returning nil as there's no layer
+// parent implements the layer interface, returning nil as there's no layer
 // below the disk.
 func (dl *diskLayer) parentLayer() layer {
 	return nil
@@ -93,53 +95,68 @@ func (dl *diskLayer) markStale() {
 	dl.stale = true
 }
 
-// node implements the layer interface, retrieving the trie node with the
+// Node implements the layer interface, retrieving the trie node with the
 // provided node info. No error will be returned if the node is not found.
-func (dl *diskLayer) node(owner common.Hash, path []byte, depth int) ([]byte, common.Hash, *nodeLoc, error) {
+func (dl *diskLayer) Node(owner common.Hash, path []byte, hash common.Hash) ([]byte, error) {
 	dl.lock.RLock()
 	defer dl.lock.RUnlock()
 
 	if dl.stale {
-		return nil, common.Hash{}, nil, errSnapshotStale
+		return nil, errSnapshotStale
 	}
 	// Try to retrieve the trie node from the not-yet-written
 	// node buffer first. Note the buffer is lock free since
 	// it's impossible to mutate the buffer before tagging the
 	// layer as stale.
-	n, found := dl.buffer.node(owner, path)
-	if found {
+	n, err := dl.buffer.node(owner, path, hash)
+	if err != nil {
+		return nil, err
+	}
+	if n != nil {
 		dirtyHitMeter.Mark(1)
 		dirtyReadMeter.Mark(int64(len(n.Blob)))
-		dirtyNodeHitDepthHist.Update(int64(depth))
-		return n.Blob, n.Hash, &nodeLoc{loc: locDirtyCache, depth: depth}, nil
+		return n.Blob, nil
 	}
 	dirtyMissMeter.Mark(1)
 
 	// Try to retrieve the trie node from the clean memory cache
-	h := newHasher()
-	defer h.release()
-
 	key := cacheKey(owner, path)
 	if dl.cleans != nil {
 		if blob := dl.cleans.Get(nil, key); len(blob) > 0 {
-			cleanHitMeter.Mark(1)
-			cleanReadMeter.Mark(int64(len(blob)))
-			return blob, h.hash(blob), &nodeLoc{loc: locCleanCache, depth: depth}, nil
+			h := newHasher()
+			defer h.release()
+
+			got := h.hash(blob)
+			if got == hash {
+				cleanHitMeter.Mark(1)
+				cleanReadMeter.Mark(int64(len(blob)))
+				return blob, nil
+			}
+			cleanFalseMeter.Mark(1)
+			log.Error("Unexpected trie node in clean cache", "owner", owner, "path", path, "expect", hash, "got", got)
 		}
 		cleanMissMeter.Mark(1)
 	}
 	// Try to retrieve the trie node from the disk.
-	var blob []byte
+	var (
+		nBlob []byte
+		nHash common.Hash
+	)
 	if owner == (common.Hash{}) {
-		blob = rawdb.ReadAccountTrieNode(dl.db.diskdb, path)
+		nBlob, nHash = rawdb.ReadAccountTrieNode(dl.db.diskdb, path)
 	} else {
-		blob = rawdb.ReadStorageTrieNode(dl.db.diskdb, owner, path)
+		nBlob, nHash = rawdb.ReadStorageTrieNode(dl.db.diskdb, owner, path)
 	}
-	if dl.cleans != nil && len(blob) > 0 {
-		dl.cleans.Set(key, blob)
-		cleanWriteMeter.Mark(int64(len(blob)))
+	if nHash != hash {
+		diskFalseMeter.Mark(1)
+		log.Error("Unexpected trie node in disk", "owner", owner, "path", path, "expect", hash, "got", nHash)
+		return nil, newUnexpectedNodeError("disk", hash, nHash, owner, path, nBlob)
 	}
-	return blob, h.hash(blob), &nodeLoc{loc: locDiskLayer, depth: depth}, nil
+	if dl.cleans != nil && len(nBlob) > 0 {
+		dl.cleans.Set(key, nBlob)
+		cleanWriteMeter.Mark(int64(len(nBlob)))
+	}
+	return nBlob, nil
 }
 
 // update implements the layer interface, returning a new diff layer on top
@@ -218,9 +235,15 @@ func (dl *diskLayer) commit(bottom *diffLayer, force bool) (*diskLayer, error) {
 }
 
 // revert applies the given state history and return a reverted disk layer.
-func (dl *diskLayer) revert(h *history) (*diskLayer, error) {
+func (dl *diskLayer) revert(h *history, loader triestate.TrieLoader) (*diskLayer, error) {
 	if h.meta.root != dl.rootHash() {
 		return nil, errUnexpectedHistory
+	}
+	// Reject if the provided state history is incomplete. It's due to
+	// a large construct SELF-DESTRUCT which can't be handled because
+	// of memory limitation.
+	if len(h.meta.incomplete) > 0 {
+		return nil, errors.New("incomplete state history")
 	}
 	if dl.id == 0 {
 		return nil, fmt.Errorf("%w: zero state id", errStateUnrecoverable)
@@ -228,7 +251,7 @@ func (dl *diskLayer) revert(h *history) (*diskLayer, error) {
 	// Apply the reverse state changes upon the current state. This must
 	// be done before holding the lock in order to access state in "this"
 	// layer.
-	nodes, err := apply(dl.db, h.meta.parent, h.meta.root, h.accounts, h.storages)
+	nodes, err := triestate.Apply(h.meta.parent, h.meta.root, h.accounts, h.storages, loader)
 	if err != nil {
 		return nil, err
 	}
@@ -299,7 +322,7 @@ func (dl *diskLayer) resetCache() {
 type hasher struct{ sha crypto.KeccakState }
 
 var hasherPool = sync.Pool{
-	New: func() interface{} { return &hasher{sha: crypto.NewKeccakState()} },
+	New: func() interface{} { return &hasher{sha: sha3.NewLegacyKeccak256().(crypto.KeccakState)} },
 }
 
 func newHasher() *hasher {

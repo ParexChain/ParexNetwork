@@ -205,8 +205,8 @@ func discoverUPnP() Interface {
 	return nil
 }
 
-// discover finds devices matching the given target and calls matcher for
-// all advertised services of each device. The first non-nil service found
+// finds devices matching the given target and calls matcher for all
+// advertised services of each device. The first non-nil service found
 // is sent into out. If no service matched, nil is sent.
 func discover(out chan<- *upnp, target string, matcher func(goupnp.ServiceClient) *upnp) {
 	devs, err := goupnp.DiscoverDevices(target)

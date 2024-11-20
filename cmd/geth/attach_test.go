@@ -48,7 +48,7 @@ func TestAttachWithHeaders(t *testing.T) {
 	// This is fixed in a follow-up PR.
 }
 
-// TestRemoteDbWithHeaders tests that 'geth db --remotedb' with custom headers works, i.e
+// TestAttachWithHeaders tests that 'geth db --remotedb' with custom headers works, i.e
 // that custom headers are forwarded to the target.
 func TestRemoteDbWithHeaders(t *testing.T) {
 	t.Parallel()

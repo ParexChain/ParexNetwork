@@ -241,12 +241,12 @@ func newCommitteeChainTest(t *testing.T, config types.ChainConfig, signerThresho
 		signerThreshold: signerThreshold,
 		enforceTime:     enforceTime,
 	}
-	c.chain = NewTestCommitteeChain(c.db, &config, signerThreshold, enforceTime, c.clock)
+	c.chain = newCommitteeChain(c.db, &config, signerThreshold, enforceTime, dummyVerifier{}, c.clock, func() int64 { return int64(c.clock.Now()) })
 	return c
 }
 
 func (c *committeeChainTest) reloadChain() {
-	c.chain = NewTestCommitteeChain(c.db, &c.config, c.signerThreshold, c.enforceTime, c.clock)
+	c.chain = newCommitteeChain(c.db, &c.config, c.signerThreshold, c.enforceTime, dummyVerifier{}, c.clock, func() int64 { return int64(c.clock.Now()) })
 }
 
 func (c *committeeChainTest) setClockPeriod(period float64) {

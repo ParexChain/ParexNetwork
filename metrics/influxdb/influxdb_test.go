@@ -23,7 +23,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"runtime"
 	"strings"
 	"testing"
 
@@ -38,10 +37,6 @@ func TestMain(m *testing.M) {
 }
 
 func TestExampleV1(t *testing.T) {
-	if runtime.GOARCH == "arm64" {
-		t.Skip("test skipped on ARM64 due to floating point precision differences")
-	}
-
 	r := internal.ExampleMetrics()
 	var have, want string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -74,10 +69,6 @@ func TestExampleV1(t *testing.T) {
 }
 
 func TestExampleV2(t *testing.T) {
-	if runtime.GOARCH == "arm64" {
-		t.Skip("test skipped on ARM64 due to floating point precision differences")
-	}
-
 	r := internal.ExampleMetrics()
 	var have, want string
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -29,12 +29,18 @@ import (
 
 // TestExport does basic sanity checks on the export/import functionality
 func TestExport(t *testing.T) {
-	f := fmt.Sprintf("%v/tempdump", t.TempDir())
+	f := fmt.Sprintf("%v/tempdump", os.TempDir())
+	defer func() {
+		os.Remove(f)
+	}()
 	testExport(t, f)
 }
 
 func TestExportGzip(t *testing.T) {
-	f := fmt.Sprintf("%v/tempdump.gz", t.TempDir())
+	f := fmt.Sprintf("%v/tempdump.gz", os.TempDir())
+	defer func() {
+		os.Remove(f)
+	}()
 	testExport(t, f)
 }
 
@@ -91,16 +97,22 @@ func testExport(t *testing.T, f string) {
 	}
 }
 
-// TestDeletionExport tests if the deletion markers can be exported/imported correctly
+// testDeletion tests if the deletion markers can be exported/imported correctly
 func TestDeletionExport(t *testing.T) {
-	f := fmt.Sprintf("%v/tempdump", t.TempDir())
+	f := fmt.Sprintf("%v/tempdump", os.TempDir())
+	defer func() {
+		os.Remove(f)
+	}()
 	testDeletion(t, f)
 }
 
 // TestDeletionExportGzip tests if the deletion markers can be exported/imported
 // correctly with gz compression.
 func TestDeletionExportGzip(t *testing.T) {
-	f := fmt.Sprintf("%v/tempdump.gz", t.TempDir())
+	f := fmt.Sprintf("%v/tempdump.gz", os.TempDir())
+	defer func() {
+		os.Remove(f)
+	}()
 	testDeletion(t, f)
 }
 
@@ -159,7 +171,10 @@ func testDeletion(t *testing.T, f string) {
 // TestImportFutureFormat tests that we reject unsupported future versions.
 func TestImportFutureFormat(t *testing.T) {
 	t.Parallel()
-	f := fmt.Sprintf("%v/tempdump-future", t.TempDir())
+	f := fmt.Sprintf("%v/tempdump-future", os.TempDir())
+	defer func() {
+		os.Remove(f)
+	}()
 	fh, err := os.OpenFile(f, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
 		t.Fatal(err)

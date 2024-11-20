@@ -18,7 +18,6 @@ package discover
 
 import (
 	"net"
-	"net/netip"
 	"sync"
 	"time"
 
@@ -71,7 +70,7 @@ func (t *talkSystem) register(protocol string, handler TalkRequestHandler) {
 }
 
 // handleRequest handles a talk request.
-func (t *talkSystem) handleRequest(id enode.ID, addr netip.AddrPort, req *v5wire.TalkRequest) {
+func (t *talkSystem) handleRequest(id enode.ID, addr *net.UDPAddr, req *v5wire.TalkRequest) {
 	t.mutex.Lock()
 	handler, ok := t.handlers[req.Protocol]
 	t.mutex.Unlock()
@@ -89,8 +88,7 @@ func (t *talkSystem) handleRequest(id enode.ID, addr netip.AddrPort, req *v5wire
 	case <-t.slots:
 		go func() {
 			defer func() { t.slots <- struct{}{} }()
-			udpAddr := &net.UDPAddr{IP: addr.Addr().AsSlice(), Port: int(addr.Port())}
-			respMessage := handler(id, udpAddr, req.Message)
+			respMessage := handler(id, addr, req.Message)
 			resp := &v5wire.TalkResponse{ReqID: req.ReqID, Message: respMessage}
 			t.transport.sendFromAnotherThread(id, addr, resp)
 		}()

@@ -98,15 +98,3 @@ func FuzzMapG2(f *testing.F) {
 		fuzz(blsMapG2, data)
 	})
 }
-
-func FuzzG1SubgroupChecks(f *testing.F) {
-	f.Fuzz(func(t *testing.T, data []byte) {
-		fuzzG1SubgroupChecks(data)
-	})
-}
-
-func FuzzG2SubgroupChecks(f *testing.F) {
-	f.Fuzz(func(t *testing.T, data []byte) {
-		fuzzG2SubgroupChecks(data)
-	})
-}

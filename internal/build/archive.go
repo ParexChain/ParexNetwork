@@ -272,22 +272,17 @@ func extractFile(arpath string, armode os.FileMode, data io.Reader, dest string)
 		return fmt.Errorf("path %q escapes archive destination", target)
 	}
 
-	// Remove the preivously-extracted file if it exists
-	if err := os.RemoveAll(target); err != nil {
-		return err
-	}
-
-	// Recreate the destination directory
+	// Ensure the destination directory exists.
 	if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 		return err
 	}
 
 	// Copy file data.
-	file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, armode)
+	file, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, armode)
 	if err != nil {
 		return err
 	}
-	if _, err = io.Copy(file, data); err != nil {
+	if _, err := io.Copy(file, data); err != nil {
 		file.Close()
 		os.Remove(target)
 		return err

@@ -17,7 +17,6 @@
 package netutil
 
 import (
-	"net/netip"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -30,14 +29,14 @@ type IPTracker struct {
 	contactWindow   time.Duration
 	minStatements   int
 	clock           mclock.Clock
-	statements      map[netip.Addr]ipStatement
-	contact         map[netip.Addr]mclock.AbsTime
+	statements      map[string]ipStatement
+	contact         map[string]mclock.AbsTime
 	lastStatementGC mclock.AbsTime
 	lastContactGC   mclock.AbsTime
 }
 
 type ipStatement struct {
-	endpoint netip.AddrPort
+	endpoint string
 	time     mclock.AbsTime
 }
 
@@ -52,9 +51,9 @@ func NewIPTracker(window, contactWindow time.Duration, minStatements int) *IPTra
 	return &IPTracker{
 		window:        window,
 		contactWindow: contactWindow,
-		statements:    make(map[netip.Addr]ipStatement),
+		statements:    make(map[string]ipStatement),
 		minStatements: minStatements,
-		contact:       make(map[netip.Addr]mclock.AbsTime),
+		contact:       make(map[string]mclock.AbsTime),
 		clock:         mclock.System{},
 	}
 }
@@ -75,15 +74,12 @@ func (it *IPTracker) PredictFullConeNAT() bool {
 }
 
 // PredictEndpoint returns the current prediction of the external endpoint.
-func (it *IPTracker) PredictEndpoint() netip.AddrPort {
+func (it *IPTracker) PredictEndpoint() string {
 	it.gcStatements(it.clock.Now())
 
 	// The current strategy is simple: find the endpoint with most statements.
-	var (
-		counts   = make(map[netip.AddrPort]int, len(it.statements))
-		maxcount int
-		max      netip.AddrPort
-	)
+	counts := make(map[string]int, len(it.statements))
+	maxcount, max := 0, ""
 	for _, s := range it.statements {
 		c := counts[s.endpoint] + 1
 		counts[s.endpoint] = c
@@ -95,7 +91,7 @@ func (it *IPTracker) PredictEndpoint() netip.AddrPort {
 }
 
 // AddStatement records that a certain host thinks our external endpoint is the one given.
-func (it *IPTracker) AddStatement(host netip.Addr, endpoint netip.AddrPort) {
+func (it *IPTracker) AddStatement(host, endpoint string) {
 	now := it.clock.Now()
 	it.statements[host] = ipStatement{endpoint, now}
 	if time.Duration(now-it.lastStatementGC) >= it.window {
@@ -105,7 +101,7 @@ func (it *IPTracker) AddStatement(host netip.Addr, endpoint netip.AddrPort) {
 
 // AddContact records that a packet containing our endpoint information has been sent to a
 // certain host.
-func (it *IPTracker) AddContact(host netip.Addr) {
+func (it *IPTracker) AddContact(host string) {
 	now := it.clock.Now()
 	it.contact[host] = now
 	if time.Duration(now-it.lastContactGC) >= it.contactWindow {

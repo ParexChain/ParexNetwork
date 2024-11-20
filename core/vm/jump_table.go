@@ -57,7 +57,6 @@ var (
 	mergeInstructionSet            = newMergeInstructionSet()
 	shanghaiInstructionSet         = newShanghaiInstructionSet()
 	cancunInstructionSet           = newCancunInstructionSet()
-	verkleInstructionSet           = newVerkleInstructionSet()
 )
 
 // JumpTable contains the EVM opcodes supported at a given fork.
@@ -79,12 +78,6 @@ func validate(jt JumpTable) JumpTable {
 		}
 	}
 	return jt
-}
-
-func newVerkleInstructionSet() JumpTable {
-	instructionSet := newCancunInstructionSet()
-	enable4762(&instructionSet)
-	return validate(instructionSet)
 }
 
 func newCancunInstructionSet() JumpTable {
@@ -892,97 +885,97 @@ func newFrontierInstructionSet() JumpTable {
 			maxStack:    maxDupStack(16),
 		},
 		SWAP1: {
-			execute:     opSwap1,
+			execute:     makeSwap(1),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(2),
 			maxStack:    maxSwapStack(2),
 		},
 		SWAP2: {
-			execute:     opSwap2,
+			execute:     makeSwap(2),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(3),
 			maxStack:    maxSwapStack(3),
 		},
 		SWAP3: {
-			execute:     opSwap3,
+			execute:     makeSwap(3),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(4),
 			maxStack:    maxSwapStack(4),
 		},
 		SWAP4: {
-			execute:     opSwap4,
+			execute:     makeSwap(4),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(5),
 			maxStack:    maxSwapStack(5),
 		},
 		SWAP5: {
-			execute:     opSwap5,
+			execute:     makeSwap(5),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(6),
 			maxStack:    maxSwapStack(6),
 		},
 		SWAP6: {
-			execute:     opSwap6,
+			execute:     makeSwap(6),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(7),
 			maxStack:    maxSwapStack(7),
 		},
 		SWAP7: {
-			execute:     opSwap7,
+			execute:     makeSwap(7),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(8),
 			maxStack:    maxSwapStack(8),
 		},
 		SWAP8: {
-			execute:     opSwap8,
+			execute:     makeSwap(8),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(9),
 			maxStack:    maxSwapStack(9),
 		},
 		SWAP9: {
-			execute:     opSwap9,
+			execute:     makeSwap(9),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(10),
 			maxStack:    maxSwapStack(10),
 		},
 		SWAP10: {
-			execute:     opSwap10,
+			execute:     makeSwap(10),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(11),
 			maxStack:    maxSwapStack(11),
 		},
 		SWAP11: {
-			execute:     opSwap11,
+			execute:     makeSwap(11),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(12),
 			maxStack:    maxSwapStack(12),
 		},
 		SWAP12: {
-			execute:     opSwap12,
+			execute:     makeSwap(12),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(13),
 			maxStack:    maxSwapStack(13),
 		},
 		SWAP13: {
-			execute:     opSwap13,
+			execute:     makeSwap(13),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(14),
 			maxStack:    maxSwapStack(14),
 		},
 		SWAP14: {
-			execute:     opSwap14,
+			execute:     makeSwap(14),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(15),
 			maxStack:    maxSwapStack(15),
 		},
 		SWAP15: {
-			execute:     opSwap15,
+			execute:     makeSwap(15),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(16),
 			maxStack:    maxSwapStack(16),
 		},
 		SWAP16: {
-			execute:     opSwap16,
+			execute:     makeSwap(16),
 			constantGas: GasFastestStep,
 			minStack:    minSwapStack(17),
 			maxStack:    maxSwapStack(17),

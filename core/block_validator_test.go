@@ -50,7 +50,7 @@ func testHeaderVerification(t *testing.T, scheme string) {
 		headers[i] = block.Header()
 	}
 	// Run the header checker for blocks one-by-one, checking for both valid and invalid nonces
-	chain, _ := NewBlockChain(rawdb.NewMemoryDatabase(), DefaultCacheConfigWithScheme(scheme), gspec, nil, ethash.NewFaker(), vm.Config{}, nil)
+	chain, _ := NewBlockChain(rawdb.NewMemoryDatabase(), DefaultCacheConfigWithScheme(scheme), gspec, nil, ethash.NewFaker(), vm.Config{}, nil, nil)
 	defer chain.Stop()
 
 	for i := 0; i < len(blocks); i++ {
@@ -94,6 +94,7 @@ func testHeaderVerificationForMerging(t *testing.T, isClique bool) {
 		preBlocks  []*types.Block
 		postBlocks []*types.Block
 		engine     consensus.Engine
+		merger     = consensus.NewMerger(rawdb.NewMemoryDatabase())
 	)
 	if isClique {
 		var (
@@ -154,13 +155,15 @@ func testHeaderVerificationForMerging(t *testing.T, isClique bool) {
 	preHeaders := make([]*types.Header, len(preBlocks))
 	for i, block := range preBlocks {
 		preHeaders[i] = block.Header()
+		t.Logf("Pre-merge header: %d", block.NumberU64())
 	}
 	postHeaders := make([]*types.Header, len(postBlocks))
 	for i, block := range postBlocks {
 		postHeaders[i] = block.Header()
+		t.Logf("Post-merge header: %d", block.NumberU64())
 	}
 	// Run the header checker for blocks one-by-one, checking for both valid and invalid nonces
-	chain, _ := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil)
+	chain, _ := NewBlockChain(rawdb.NewMemoryDatabase(), nil, gspec, nil, engine, vm.Config{}, nil, nil)
 	defer chain.Stop()
 
 	// Verify the blocks before the merging
@@ -183,6 +186,11 @@ func testHeaderVerificationForMerging(t *testing.T, isClique bool) {
 		}
 		chain.InsertChain(preBlocks[i : i+1])
 	}
+
+	// Make the transition
+	merger.ReachTTD()
+	merger.FinalizePoS()
+
 	// Verify the blocks after the merging
 	for i := 0; i < len(postBlocks); i++ {
 		_, results := engine.VerifyHeaders(chain, []*types.Header{postHeaders[i]})
@@ -201,7 +209,7 @@ func testHeaderVerificationForMerging(t *testing.T, isClique bool) {
 			t.Fatalf("post-block %d: unexpected result returned: %v", i, result)
 		case <-time.After(25 * time.Millisecond):
 		}
-		chain.InsertBlockWithoutSetHead(postBlocks[i], false)
+		chain.InsertBlockWithoutSetHead(postBlocks[i])
 	}
 
 	// Verify the blocks with pre-merge blocks and post-merge blocks

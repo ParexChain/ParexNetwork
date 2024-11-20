@@ -18,7 +18,6 @@ package p2p
 
 import (
 	"net"
-	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,7 +35,6 @@ func TestServerPortMapping(t *testing.T) {
 			PrivateKey: newkey(),
 			NoDial:     true,
 			ListenAddr: ":0",
-			DiscAddr:   ":0",
 			NAT:        mockNAT,
 			Logger:     testlog.Logger(t, log.LvlTrace),
 			clock:      clock,
@@ -66,8 +64,8 @@ func TestServerPortMapping(t *testing.T) {
 		t.Error("wrong request count:", reqCount)
 	}
 	enr := srv.LocalNode().Node()
-	if enr.IPAddr() != netip.MustParseAddr("192.0.2.0") {
-		t.Error("wrong IP in ENR:", enr.IPAddr())
+	if enr.IP().String() != "192.0.2.0" {
+		t.Error("wrong IP in ENR:", enr.IP())
 	}
 	if enr.TCP() != 30000 {
 		t.Error("wrong TCP port in ENR:", enr.TCP())

@@ -22,7 +22,7 @@ package core
 import (
 	"fmt"
 	"math/big"
-	"path/filepath"
+	"path"
 	"strings"
 	"testing"
 	"time"
@@ -1961,12 +1961,12 @@ func testSetHead(t *testing.T, tt *rewindTest, snapshots bool) {
 
 func testSetHeadWithScheme(t *testing.T, tt *rewindTest, snapshots bool, scheme string) {
 	// It's hard to follow the test case, visualize the input
-	// log.SetDefault(log.NewLogger(log.NewTerminalHandlerWithLevel(os.Stderr, log.LevelInfo, true)))
+	// log.Root().SetHandler(log.LvlFilterHandler(log.LvlTrace, log.StreamHandler(os.Stderr, log.TerminalFormat(true))))
 	// fmt.Println(tt.dump(false))
 
 	// Create a temporary persistent database
 	datadir := t.TempDir()
-	ancient := filepath.Join(datadir, "ancient")
+	ancient := path.Join(datadir, "ancient")
 
 	db, err := rawdb.Open(rawdb.OpenOptions{
 		Directory:         datadir,
@@ -1997,7 +1997,7 @@ func testSetHeadWithScheme(t *testing.T, tt *rewindTest, snapshots bool, scheme 
 		config.SnapshotLimit = 256
 		config.SnapshotWait = true
 	}
-	chain, err := NewBlockChain(db, config, gspec, nil, engine, vm.Config{}, nil)
+	chain, err := NewBlockChain(db, config, gspec, nil, engine, vm.Config{}, nil, nil)
 	if err != nil {
 		t.Fatalf("Failed to create chain: %v", err)
 	}
@@ -2040,18 +2040,14 @@ func testSetHeadWithScheme(t *testing.T, tt *rewindTest, snapshots bool, scheme 
 		dbconfig.HashDB = hashdb.Defaults
 	}
 	chain.triedb = triedb.NewDatabase(chain.db, dbconfig)
-	chain.statedb = state.NewDatabase(chain.triedb, chain.snaps)
+	chain.stateCache = state.NewDatabaseWithNodeDB(chain.db, chain.triedb)
 
 	// Force run a freeze cycle
 	type freezer interface {
-		Freeze() error
+		Freeze(threshold uint64) error
 		Ancients() (uint64, error)
 	}
-	if tt.freezeThreshold < uint64(tt.canonicalBlocks) {
-		final := uint64(tt.canonicalBlocks) - tt.freezeThreshold
-		chain.SetFinalized(canonblocks[int(final)-1].Header())
-	}
-	db.(freezer).Freeze()
+	db.(freezer).Freeze(tt.freezeThreshold)
 
 	// Set the simulated pivot block
 	if tt.pivotBlock != nil {

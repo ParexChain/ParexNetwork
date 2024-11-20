@@ -18,7 +18,6 @@ package era
 import (
 	"bytes"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -159,7 +158,7 @@ func (b *Builder) AddRLP(header, body, receipts []byte, number uint64, hash comm
 // corresponding e2store entries.
 func (b *Builder) Finalize() (common.Hash, error) {
 	if b.startNum == nil {
-		return common.Hash{}, errors.New("finalize called on empty builder")
+		return common.Hash{}, fmt.Errorf("finalize called on empty builder")
 	}
 	// Compute accumulator root and write entry.
 	root, err := ComputeAccumulator(b.hashes, b.tds)

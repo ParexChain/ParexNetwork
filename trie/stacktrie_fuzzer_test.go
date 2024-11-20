@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
-	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -28,6 +27,8 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/trie/trienode"
+	"golang.org/x/crypto/sha3"
+	"golang.org/x/exp/slices"
 )
 
 func FuzzStackTrie(f *testing.F) {
@@ -40,10 +41,10 @@ func fuzz(data []byte, debugging bool) {
 	// This spongeDb is used to check the sequence of disk-db-writes
 	var (
 		input   = bytes.NewReader(data)
-		spongeA = &spongeDb{sponge: crypto.NewKeccakState()}
+		spongeA = &spongeDb{sponge: sha3.NewLegacyKeccak256()}
 		dbA     = newTestDatabase(rawdb.NewDatabase(spongeA), rawdb.HashScheme)
 		trieA   = NewEmpty(dbA)
-		spongeB = &spongeDb{sponge: crypto.NewKeccakState()}
+		spongeB = &spongeDb{sponge: sha3.NewLegacyKeccak256()}
 		dbB     = newTestDatabase(rawdb.NewDatabase(spongeB), rawdb.HashScheme)
 		trieB   = NewStackTrie(func(path []byte, hash common.Hash, blob []byte) {
 			rawdb.WriteTrieNode(spongeB, common.Hash{}, path, hash, blob, dbB.Scheme())
@@ -79,7 +80,10 @@ func fuzz(data []byte, debugging bool) {
 		return
 	}
 	// Flush trie -> database
-	rootA, nodes := trieA.Commit(false)
+	rootA, nodes, err := trieA.Commit(false)
+	if err != nil {
+		panic(err)
+	}
 	if nodes != nil {
 		dbA.Update(rootA, types.EmptyRootHash, trienode.NewWithNodeSet(nodes))
 	}

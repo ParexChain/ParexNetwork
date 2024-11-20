@@ -30,33 +30,33 @@ var rawValueType = reflect.TypeOf(RawValue{})
 
 // StringSize returns the encoded size of a string.
 func StringSize(s string) uint64 {
-	switch n := len(s); n {
-	case 0:
+	switch {
+	case len(s) == 0:
 		return 1
-	case 1:
+	case len(s) == 1:
 		if s[0] <= 0x7f {
 			return 1
 		} else {
 			return 2
 		}
 	default:
-		return uint64(headsize(uint64(n)) + n)
+		return uint64(headsize(uint64(len(s))) + len(s))
 	}
 }
 
 // BytesSize returns the encoded size of a byte slice.
 func BytesSize(b []byte) uint64 {
-	switch n := len(b); n {
-	case 0:
+	switch {
+	case len(b) == 0:
 		return 1
-	case 1:
+	case len(b) == 1:
 		if b[0] <= 0x7f {
 			return 1
 		} else {
 			return 2
 		}
 	default:
-		return uint64(headsize(uint64(n)) + n)
+		return uint64(headsize(uint64(len(b))) + len(b))
 	}
 }
 
@@ -105,20 +105,18 @@ func SplitUint64(b []byte) (x uint64, rest []byte, err error) {
 	if err != nil {
 		return 0, b, err
 	}
-	switch n := len(content); n {
-	case 0:
+	switch {
+	case len(content) == 0:
 		return 0, rest, nil
-	case 1:
+	case len(content) == 1:
 		if content[0] == 0 {
 			return 0, b, ErrCanonInt
 		}
 		return uint64(content[0]), rest, nil
+	case len(content) > 8:
+		return 0, b, errUintOverflow
 	default:
-		if n > 8 {
-			return 0, b, errUintOverflow
-		}
-
-		x, err = readSize(content, byte(n))
+		x, err = readSize(content, byte(len(content)))
 		if err != nil {
 			return 0, b, ErrCanonInt
 		}

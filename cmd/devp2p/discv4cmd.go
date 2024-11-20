@@ -20,7 +20,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -29,11 +28,9 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/internal/flags"
-	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/params"
-	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/urfave/cli/v2"
 )
 
@@ -48,7 +45,6 @@ var (
 			discv4ResolveJSONCommand,
 			discv4CrawlCommand,
 			discv4TestCommand,
-			discv4ListenCommand,
 		},
 	}
 	discv4PingCommand = &cli.Command{
@@ -78,14 +74,6 @@ var (
 		Action:    discv4ResolveJSON,
 		Flags:     discoveryNodeFlags,
 		ArgsUsage: "<nodes.json file>",
-	}
-	discv4ListenCommand = &cli.Command{
-		Name:   "listen",
-		Usage:  "Runs a discovery node",
-		Action: discv4Listen,
-		Flags: flags.Merge(discoveryNodeFlags, []cli.Flag{
-			httpAddrFlag,
-		}),
 	}
 	discv4CrawlCommand = &cli.Command{
 		Name:   "crawl",
@@ -143,10 +131,6 @@ var (
 		Usage:   "Enode of the remote node under test",
 		EnvVars: []string{"REMOTE_ENODE"},
 	}
-	httpAddrFlag = &cli.StringFlag{
-		Name:  "rpc",
-		Usage: "HTTP server listening address",
-	}
 )
 
 var discoveryNodeFlags = []cli.Flag{
@@ -168,27 +152,6 @@ func discv4Ping(ctx *cli.Context) error {
 	}
 	fmt.Printf("node responded to ping (RTT %v).\n", time.Since(start))
 	return nil
-}
-
-func discv4Listen(ctx *cli.Context) error {
-	disc, _ := startV4(ctx)
-	defer disc.Close()
-
-	fmt.Println(disc.Self())
-
-	httpAddr := ctx.String(httpAddrFlag.Name)
-	if httpAddr == "" {
-		// Non-HTTP mode.
-		select {}
-	}
-
-	api := &discv4API{disc}
-	log.Info("Starting RPC API server", "addr", httpAddr)
-	srv := rpc.NewServer()
-	srv.RegisterName("discv4", api)
-	http.DefaultServeMux.Handle("/", srv)
-	httpsrv := http.Server{Addr: httpAddr, Handler: http.DefaultServeMux}
-	return httpsrv.ListenAndServe()
 }
 
 func discv4RequestRecord(ctx *cli.Context) error {
@@ -398,24 +361,4 @@ func parseBootnodes(ctx *cli.Context) ([]*enode.Node, error) {
 		}
 	}
 	return nodes, nil
-}
-
-type discv4API struct {
-	host *discover.UDPv4
-}
-
-func (api *discv4API) LookupRandom(n int) (ns []*enode.Node) {
-	it := api.host.RandomNodes()
-	for len(ns) < n && it.Next() {
-		ns = append(ns, it.Node())
-	}
-	return ns
-}
-
-func (api *discv4API) Buckets() [][]discover.BucketNode {
-	return api.host.TableBuckets()
-}
-
-func (api *discv4API) Self() *enode.Node {
-	return api.host.Self()
 }

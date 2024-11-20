@@ -21,6 +21,7 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
@@ -56,33 +57,24 @@ type Config struct {
 // sets defaults on the config
 func setDefaults(cfg *Config) {
 	if cfg.ChainConfig == nil {
-		var (
-			shanghaiTime = uint64(0)
-			cancunTime   = uint64(0)
-		)
 		cfg.ChainConfig = &params.ChainConfig{
-			ChainID:                       big.NewInt(1),
-			HomesteadBlock:                new(big.Int),
-			DAOForkBlock:                  new(big.Int),
-			DAOForkSupport:                false,
-			EIP150Block:                   new(big.Int),
-			EIP155Block:                   new(big.Int),
-			EIP158Block:                   new(big.Int),
-			ByzantiumBlock:                new(big.Int),
-			ConstantinopleBlock:           new(big.Int),
-			PetersburgBlock:               new(big.Int),
-			IstanbulBlock:                 new(big.Int),
-			MuirGlacierBlock:              new(big.Int),
-			BerlinBlock:                   new(big.Int),
-			LondonBlock:                   new(big.Int),
-			ArrowGlacierBlock:             nil,
-			GrayGlacierBlock:              nil,
-			TerminalTotalDifficulty:       big.NewInt(0),
-			TerminalTotalDifficultyPassed: true,
-			MergeNetsplitBlock:            nil,
-			ShanghaiTime:                  &shanghaiTime,
-			CancunTime:                    &cancunTime}
+			ChainID:             big.NewInt(1),
+			HomesteadBlock:      new(big.Int),
+			DAOForkBlock:        new(big.Int),
+			DAOForkSupport:      false,
+			EIP150Block:         new(big.Int),
+			EIP155Block:         new(big.Int),
+			EIP158Block:         new(big.Int),
+			ByzantiumBlock:      new(big.Int),
+			ConstantinopleBlock: new(big.Int),
+			PetersburgBlock:     new(big.Int),
+			IstanbulBlock:       new(big.Int),
+			MuirGlacierBlock:    new(big.Int),
+			BerlinBlock:         new(big.Int),
+			LondonBlock:         new(big.Int),
+		}
 	}
+
 	if cfg.Difficulty == nil {
 		cfg.Difficulty = new(big.Int)
 	}
@@ -109,10 +101,6 @@ func setDefaults(cfg *Config) {
 	if cfg.BlobBaseFee == nil {
 		cfg.BlobBaseFee = big.NewInt(params.BlobTxMinBlobGasprice)
 	}
-	// Merge indicators
-	if t := cfg.ChainConfig.ShanghaiTime; cfg.ChainConfig.TerminalTotalDifficultyPassed || (t != nil && *t == 0) {
-		cfg.Random = &(common.Hash{})
-	}
 }
 
 // Execute executes the code using the input as call data during the execution.
@@ -127,7 +115,7 @@ func Execute(code, input []byte, cfg *Config) ([]byte, *state.StateDB, error) {
 	setDefaults(cfg)
 
 	if cfg.State == nil {
-		cfg.State, _ = state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+		cfg.State, _ = state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
 	}
 	var (
 		address = common.BytesToAddress([]byte("contract"))
@@ -135,9 +123,6 @@ func Execute(code, input []byte, cfg *Config) ([]byte, *state.StateDB, error) {
 		sender  = vm.AccountRef(cfg.Origin)
 		rules   = cfg.ChainConfig.Rules(vmenv.Context.BlockNumber, vmenv.Context.Random != nil, vmenv.Context.Time)
 	)
-	if cfg.EVMConfig.Tracer != nil && cfg.EVMConfig.Tracer.OnTxStart != nil {
-		cfg.EVMConfig.Tracer.OnTxStart(vmenv.GetVMContext(), types.NewTx(&types.LegacyTx{To: &address, Data: input, Value: cfg.Value, Gas: cfg.GasLimit}), cfg.Origin)
-	}
 	// Execute the preparatory steps for state transition which includes:
 	// - prepare accessList(post-berlin)
 	// - reset transient storage(eip 1153)
@@ -164,16 +149,13 @@ func Create(input []byte, cfg *Config) ([]byte, common.Address, uint64, error) {
 	setDefaults(cfg)
 
 	if cfg.State == nil {
-		cfg.State, _ = state.New(types.EmptyRootHash, state.NewDatabaseForTesting())
+		cfg.State, _ = state.New(types.EmptyRootHash, state.NewDatabase(rawdb.NewMemoryDatabase()), nil)
 	}
 	var (
 		vmenv  = NewEnv(cfg)
 		sender = vm.AccountRef(cfg.Origin)
 		rules  = cfg.ChainConfig.Rules(vmenv.Context.BlockNumber, vmenv.Context.Random != nil, vmenv.Context.Time)
 	)
-	if cfg.EVMConfig.Tracer != nil && cfg.EVMConfig.Tracer.OnTxStart != nil {
-		cfg.EVMConfig.Tracer.OnTxStart(vmenv.GetVMContext(), types.NewTx(&types.LegacyTx{Data: input, Value: cfg.Value, Gas: cfg.GasLimit}), cfg.Origin)
-	}
 	// Execute the preparatory steps for state transition which includes:
 	// - prepare accessList(post-berlin)
 	// - reset transient storage(eip 1153)
@@ -202,9 +184,6 @@ func Call(address common.Address, input []byte, cfg *Config) ([]byte, uint64, er
 		statedb = cfg.State
 		rules   = cfg.ChainConfig.Rules(vmenv.Context.BlockNumber, vmenv.Context.Random != nil, vmenv.Context.Time)
 	)
-	if cfg.EVMConfig.Tracer != nil && cfg.EVMConfig.Tracer.OnTxStart != nil {
-		cfg.EVMConfig.Tracer.OnTxStart(vmenv.GetVMContext(), types.NewTx(&types.LegacyTx{To: &address, Data: input, Value: cfg.Value, Gas: cfg.GasLimit}), cfg.Origin)
-	}
 	// Execute the preparatory steps for state transition which includes:
 	// - prepare accessList(post-berlin)
 	// - reset transient storage(eip 1153)

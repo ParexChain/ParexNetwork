@@ -34,11 +34,10 @@ import (
 )
 
 var (
-	errInvalidTopic           = errors.New("invalid topic(s)")
-	errFilterNotFound         = errors.New("filter not found")
-	errInvalidBlockRange      = errors.New("invalid block range params")
-	errPendingLogsUnsupported = errors.New("pending logs are not supported")
-	errExceedMaxTopics        = errors.New("exceed max topics")
+	errInvalidTopic      = errors.New("invalid topic(s)")
+	errFilterNotFound    = errors.New("filter not found")
+	errInvalidBlockRange = errors.New("invalid block range params")
+	errExceedMaxTopics   = errors.New("exceed max topics")
 )
 
 // The maximum number of topic criteria allowed, vm.LOG4 - vm.LOG0
@@ -71,10 +70,10 @@ type FilterAPI struct {
 }
 
 // NewFilterAPI returns a new FilterAPI instance.
-func NewFilterAPI(system *FilterSystem) *FilterAPI {
+func NewFilterAPI(system *FilterSystem, lightMode bool) *FilterAPI {
 	api := &FilterAPI{
 		sys:     system,
-		events:  NewEventSystem(system),
+		events:  NewEventSystem(system, lightMode),
 		filters: make(map[rpc.ID]*filter),
 		timeout: system.cfg.Timeout,
 	}
@@ -183,6 +182,8 @@ func (api *FilterAPI) NewPendingTransactions(ctx context.Context, fullTx *bool) 
 				}
 			case <-rpcSub.Err():
 				return
+			case <-notifier.Closed():
+				return
 			}
 		}
 	}()
@@ -243,6 +244,8 @@ func (api *FilterAPI) NewHeads(ctx context.Context) (*rpc.Subscription, error) {
 				notifier.Notify(rpcSub.ID, h)
 			case <-rpcSub.Err():
 				return
+			case <-notifier.Closed():
+				return
 			}
 		}
 	}()
@@ -277,6 +280,8 @@ func (api *FilterAPI) Logs(ctx context.Context, crit FilterCriteria) (*rpc.Subsc
 					notifier.Notify(rpcSub.ID, &log)
 				}
 			case <-rpcSub.Err(): // client send an unsubscribe request
+				return
+			case <-notifier.Closed(): // connection dropped
 				return
 			}
 		}
@@ -457,7 +462,7 @@ func (api *FilterAPI) GetFilterChanges(id rpc.ID) (interface{}, error) {
 				f.txs = nil
 				return hashes, nil
 			}
-		case LogsSubscription:
+		case LogsSubscription, MinedAndPendingLogsSubscription:
 			logs := f.logs
 			f.logs = nil
 			return returnLogs(logs), nil

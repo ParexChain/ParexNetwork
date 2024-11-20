@@ -24,8 +24,6 @@ import (
 )
 
 func TestTest(t *testing.T) {
-	t.Parallel()
-
 	tests := []Test{
 		{
 			Name: "successful test",
@@ -92,8 +90,6 @@ var outputTests = []Test{
 }
 
 func TestOutput(t *testing.T) {
-	t.Parallel()
-
 	var buf bytes.Buffer
 	RunTests(outputTests, &buf)
 
@@ -120,8 +116,6 @@ $`[1:])
 }
 
 func TestOutputTAP(t *testing.T) {
-	t.Parallel()
-
 	var buf bytes.Buffer
 	RunTAP(outputTests, &buf)
 

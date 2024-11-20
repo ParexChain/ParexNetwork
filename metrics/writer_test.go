@@ -1,8 +1,9 @@
 package metrics
 
 import (
-	"slices"
 	"testing"
+
+	"golang.org/x/exp/slices"
 )
 
 func TestMetricsSorting(t *testing.T) {

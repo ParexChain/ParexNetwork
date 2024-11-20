@@ -3734,7 +3734,7 @@ var inputCallFormatter = function (options){
         options.to = inputAddressFormatter(options.to);
     }
 
-    ['maxFeePerBlobGas', 'maxFeePerGas', 'maxPriorityFeePerGas', 'gasPrice', 'gas', 'value', 'nonce'].filter(function (key) {
+    ['maxFeePerGas', 'maxPriorityFeePerGas', 'gasPrice', 'gas', 'value', 'nonce'].filter(function (key) {
         return options[key] !== undefined;
     }).forEach(function(key){
         options[key] = utils.fromDecimal(options[key]);
@@ -3759,7 +3759,7 @@ var inputTransactionFormatter = function (options){
         options.to = inputAddressFormatter(options.to);
     }
 
-    ['maxFeePerBlobGas', 'maxFeePerGas', 'maxPriorityFeePerGas', 'gasPrice', 'gas', 'value', 'nonce'].filter(function (key) {
+    ['maxFeePerGas', 'maxPriorityFeePerGas', 'gasPrice', 'gas', 'value', 'nonce'].filter(function (key) {
         return options[key] !== undefined;
     }).forEach(function(key){
         options[key] = utils.fromDecimal(options[key]);
@@ -3789,9 +3789,6 @@ var outputTransactionFormatter = function (tx){
     if(tx.maxPriorityFeePerGas !== undefined) {
       tx.maxPriorityFeePerGas = utils.toBigNumber(tx.maxPriorityFeePerGas);
     }
-    if(tx.maxFeePerBlobGas !== undefined) {
-      tx.maxFeePerBlobGas = utils.toBigNumber(tx.maxFeePerBlobGas);
-    }
     tx.value = utils.toBigNumber(tx.value);
     return tx;
 };
@@ -3812,12 +3809,6 @@ var outputTransactionReceiptFormatter = function (receipt){
     receipt.gasUsed = utils.toDecimal(receipt.gasUsed);
     if(receipt.effectiveGasPrice !== undefined) {
       receipt.effectiveGasPrice = utils.toBigNumber(receipt.effectiveGasPrice);
-    }
-    if(receipt.blobGasPrice !== undefined) {
-      receipt.blobGasPrice = utils.toBigNumber(receipt.blobGasPrice);
-    }
-    if(receipt.blobGasUsed !== undefined) {
-      receipt.blobGasUsed = utils.toBigNumber(receipt.blobGasUsed);
     }
     if(utils.isArray(receipt.logs)) {
         receipt.logs = receipt.logs.map(function(log){
@@ -3840,20 +3831,15 @@ var outputBlockFormatter = function(block) {
     if (block.baseFeePerGas !== undefined) {
       block.baseFeePerGas = utils.toBigNumber(block.baseFeePerGas);
     }
-    if (block.blobGasUsed !== undefined) {
-      block.blobGasUsed = utils.toBigNumber(block.blobGasUsed);
-    }
-    if (block.excessBlobGas !== undefined) {
-      block.excessBlobGas = utils.toBigNumber(block.excessBlobGas);
-    }
     block.gasLimit = utils.toDecimal(block.gasLimit);
     block.gasUsed = utils.toDecimal(block.gasUsed);
     block.size = utils.toDecimal(block.size);
     block.timestamp = utils.toDecimal(block.timestamp);
-    if (block.number !== null)
+    if(block.number !== null)
         block.number = utils.toDecimal(block.number);
 
     block.difficulty = utils.toBigNumber(block.difficulty);
+    block.totalDifficulty = utils.toBigNumber(block.totalDifficulty);
 
     if (utils.isArray(block.transactions)) {
         block.transactions.forEach(function(item){
@@ -5516,11 +5502,6 @@ var properties = function () {
         new Property({
             name: 'gasPrice',
             getter: 'eth_gasPrice',
-            outputFormatter: formatters.outputBigNumberFormatter
-        }),
-        new Property({
-            name: 'blobBaseFee',
-            getter: 'eth_blobBaseFee',
             outputFormatter: formatters.outputBigNumberFormatter
         }),
         new Property({

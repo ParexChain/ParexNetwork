@@ -73,14 +73,6 @@ var (
 	DerivationSignatureHash = sha256.Sum256(common.Hash{}.Bytes())
 )
 
-var (
-	// PinRegexp is the regular expression used to validate PIN codes.
-	pinRegexp = regexp.MustCompile(`^[0-9]{6,}$`)
-
-	// PukRegexp is the regular expression used to validate PUK codes.
-	pukRegexp = regexp.MustCompile(`^[0-9]{12,}$`)
-)
-
 // List of APDU command-related constants
 const (
 	claISO7816  = 0
@@ -388,7 +380,7 @@ func (w *Wallet) Open(passphrase string) error {
 	case passphrase == "":
 		return ErrPINUnblockNeeded
 	case status.PinRetryCount > 0:
-		if !pinRegexp.MatchString(passphrase) {
+		if !regexp.MustCompile(`^[0-9]{6,}$`).MatchString(passphrase) {
 			w.log.Error("PIN needs to be at least 6 digits")
 			return ErrPINNeeded
 		}
@@ -396,7 +388,7 @@ func (w *Wallet) Open(passphrase string) error {
 			return err
 		}
 	default:
-		if !pukRegexp.MatchString(passphrase) {
+		if !regexp.MustCompile(`^[0-9]{12,}$`).MatchString(passphrase) {
 			w.log.Error("PUK needs to be at least 12 digits")
 			return ErrPINUnblockNeeded
 		}

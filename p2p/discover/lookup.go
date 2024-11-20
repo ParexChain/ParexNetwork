@@ -29,16 +29,16 @@ import (
 // not need to be an actual node identifier.
 type lookup struct {
 	tab         *Table
-	queryfunc   queryFunc
-	replyCh     chan []*enode.Node
+	queryfunc   func(*node) ([]*node, error)
+	replyCh     chan []*node
 	cancelCh    <-chan struct{}
 	asked, seen map[enode.ID]bool
 	result      nodesByDistance
-	replyBuffer []*enode.Node
+	replyBuffer []*node
 	queries     int
 }
 
-type queryFunc func(*enode.Node) ([]*enode.Node, error)
+type queryFunc func(*node) ([]*node, error)
 
 func newLookup(ctx context.Context, tab *Table, target enode.ID, q queryFunc) *lookup {
 	it := &lookup{
@@ -47,7 +47,7 @@ func newLookup(ctx context.Context, tab *Table, target enode.ID, q queryFunc) *l
 		asked:     make(map[enode.ID]bool),
 		seen:      make(map[enode.ID]bool),
 		result:    nodesByDistance{target: target},
-		replyCh:   make(chan []*enode.Node, alpha),
+		replyCh:   make(chan []*node, alpha),
 		cancelCh:  ctx.Done(),
 		queries:   -1,
 	}
@@ -61,7 +61,7 @@ func newLookup(ctx context.Context, tab *Table, target enode.ID, q queryFunc) *l
 func (it *lookup) run() []*enode.Node {
 	for it.advance() {
 	}
-	return it.result.entries
+	return unwrapNodes(it.result.entries)
 }
 
 // advance advances the lookup until any new nodes have been found.
@@ -139,14 +139,33 @@ func (it *lookup) slowdown() {
 	}
 }
 
-func (it *lookup) query(n *enode.Node, reply chan<- []*enode.Node) {
+func (it *lookup) query(n *node, reply chan<- []*node) {
+	fails := it.tab.db.FindFails(n.ID(), n.IP())
 	r, err := it.queryfunc(n)
-	if !errors.Is(err, errClosed) { // avoid recording failures on shutdown.
-		success := len(r) > 0
-		it.tab.trackRequest(n, success, r)
-		if err != nil {
-			it.tab.log.Trace("FINDNODE failed", "id", n.ID(), "err", err)
+	if errors.Is(err, errClosed) {
+		// Avoid recording failures on shutdown.
+		reply <- nil
+		return
+	} else if len(r) == 0 {
+		fails++
+		it.tab.db.UpdateFindFails(n.ID(), n.IP(), fails)
+		// Remove the node from the local table if it fails to return anything useful too
+		// many times, but only if there are enough other nodes in the bucket.
+		dropped := false
+		if fails >= maxFindnodeFailures && it.tab.bucketLen(n.ID()) >= bucketSize/2 {
+			dropped = true
+			it.tab.delete(n)
 		}
+		it.tab.log.Trace("FINDNODE failed", "id", n.ID(), "failcount", fails, "dropped", dropped, "err", err)
+	} else if fails > 0 {
+		// Reset failure counter because it counts _consecutive_ failures.
+		it.tab.db.UpdateFindFails(n.ID(), n.IP(), 0)
+	}
+
+	// Grab as many nodes as possible. Some of them might not be alive anymore, but we'll
+	// just remove those again during revalidation.
+	for _, n := range r {
+		it.tab.addSeenNode(n)
 	}
 	reply <- r
 }
@@ -154,7 +173,7 @@ func (it *lookup) query(n *enode.Node, reply chan<- []*enode.Node) {
 // lookupIterator performs lookup operations and iterates over all seen nodes.
 // When a lookup finishes, a new one is created through nextLookup.
 type lookupIterator struct {
-	buffer     []*enode.Node
+	buffer     []*node
 	nextLookup lookupFunc
 	ctx        context.Context
 	cancel     func()
@@ -173,7 +192,7 @@ func (it *lookupIterator) Node() *enode.Node {
 	if len(it.buffer) == 0 {
 		return nil
 	}
-	return it.buffer[0]
+	return unwrapNode(it.buffer[0])
 }
 
 // Next moves to the next node.

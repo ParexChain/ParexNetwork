@@ -31,11 +31,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/snapshot"
-	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/trie/triestate"
 	"github.com/ethereum/go-ethereum/triedb"
 	"github.com/ethereum/go-ethereum/triedb/pathdb"
 	"github.com/holiman/uint256"
@@ -61,7 +61,7 @@ func newStateTestAction(addr common.Address, r *rand.Rand, index int) testAction
 		{
 			name: "SetBalance",
 			fn: func(a testAction, s *StateDB) {
-				s.SetBalance(addr, uint256.NewInt(uint64(a.args[0])), tracing.BalanceChangeUnspecified)
+				s.SetBalance(addr, uint256.NewInt(uint64(a.args[0])))
 			},
 			args: make([]int64, 1),
 		},
@@ -73,7 +73,7 @@ func newStateTestAction(addr common.Address, r *rand.Rand, index int) testAction
 			args: make([]int64, 1),
 		},
 		{
-			name: "SetStorage",
+			name: "SetState",
 			fn: func(a testAction, s *StateDB) {
 				var key, val common.Hash
 				binary.BigEndian.PutUint16(key[:], uint16(a.args[0]))
@@ -95,9 +95,7 @@ func newStateTestAction(addr common.Address, r *rand.Rand, index int) testAction
 		{
 			name: "CreateAccount",
 			fn: func(a testAction, s *StateDB) {
-				if !s.Exist(addr) {
-					s.CreateAccount(addr)
-				}
+				s.CreateAccount(addr)
 			},
 		},
 		{
@@ -179,24 +177,13 @@ func (test *stateTest) run() bool {
 		roots       []common.Hash
 		accountList []map[common.Address][]byte
 		storageList []map[common.Address]map[common.Hash][]byte
-		copyUpdate  = func(update *stateUpdate) {
-			accounts := make(map[common.Address][]byte, len(update.accountsOrigin))
-			for key, val := range update.accountsOrigin {
-				accounts[key] = common.CopyBytes(val)
-			}
-			accountList = append(accountList, accounts)
-
-			storages := make(map[common.Address]map[common.Hash][]byte, len(update.storagesOrigin))
-			for addr, subset := range update.storagesOrigin {
-				storages[addr] = make(map[common.Hash][]byte, len(subset))
-				for key, val := range subset {
-					storages[addr][key] = common.CopyBytes(val)
-				}
-			}
-			storageList = append(storageList, storages)
+		onCommit    = func(states *triestate.Set) {
+			accountList = append(accountList, copySet(states.Accounts))
+			storageList = append(storageList, copy2DSet(states.Storages))
 		}
 		disk      = rawdb.NewMemoryDatabase()
 		tdb       = triedb.NewDatabase(disk, &triedb.Config{PathDB: pathdb.Defaults})
+		sdb       = NewDatabaseWithNodeDB(disk, tdb)
 		byzantium = rand.Intn(2) == 0
 	)
 	defer disk.Close()
@@ -216,10 +203,12 @@ func (test *stateTest) run() bool {
 		if i != 0 {
 			root = roots[len(roots)-1]
 		}
-		state, err := New(root, NewDatabase(tdb, snaps))
+		state, err := New(root, sdb, snaps)
 		if err != nil {
 			panic(err)
 		}
+		state.onCommit = onCommit
+
 		for i, action := range actions {
 			if i%test.chunk == 0 && i != 0 {
 				if byzantium {
@@ -235,15 +224,14 @@ func (test *stateTest) run() bool {
 		} else {
 			state.IntermediateRoot(true) // call intermediateRoot at the transaction boundary
 		}
-		ret, err := state.commitAndFlush(0, true) // call commit at the block boundary
+		nroot, err := state.Commit(0, true) // call commit at the block boundary
 		if err != nil {
 			panic(err)
 		}
-		if ret.empty() {
-			return true
+		if nroot == root {
+			return true // filter out non-change state transition
 		}
-		copyUpdate(ret)
-		roots = append(roots, ret.root)
+		roots = append(roots, nroot)
 	}
 	for i := 0; i < len(test.actions); i++ {
 		root := types.EmptyRootHash

@@ -78,7 +78,7 @@ func NewNodeSet(owner common.Hash) *NodeSet {
 // ForEachWithOrder iterates the nodes with the order from bottom to top,
 // right to left, nodes with the longest path will be iterated first.
 func (set *NodeSet) ForEachWithOrder(callback func(path string, n *Node)) {
-	paths := make([]string, 0, len(set.Nodes))
+	var paths []string
 	for path := range set.Nodes {
 		paths = append(paths, path)
 	}
@@ -114,12 +114,7 @@ func (set *NodeSet) Merge(owner common.Hash, nodes map[string]*Node) error {
 				set.updates -= 1
 			}
 		}
-		if node.IsDeleted() {
-			set.deletes += 1
-		} else {
-			set.updates += 1
-		}
-		set.Nodes[path] = node
+		set.AddNode([]byte(path), node)
 	}
 	return nil
 }
@@ -135,18 +130,30 @@ func (set *NodeSet) Size() (int, int) {
 	return set.updates, set.deletes
 }
 
+// Hashes returns the hashes of all updated nodes. TODO(rjl493456442) how can
+// we get rid of it?
+func (set *NodeSet) Hashes() []common.Hash {
+	var ret []common.Hash
+	for _, node := range set.Nodes {
+		ret = append(ret, node.Hash)
+	}
+	return ret
+}
+
 // Summary returns a string-representation of the NodeSet.
 func (set *NodeSet) Summary() string {
 	var out = new(strings.Builder)
 	fmt.Fprintf(out, "nodeset owner: %v\n", set.Owner)
-	for path, n := range set.Nodes {
-		// Deletion
-		if n.IsDeleted() {
-			fmt.Fprintf(out, "  [-]: %x\n", path)
-			continue
+	if set.Nodes != nil {
+		for path, n := range set.Nodes {
+			// Deletion
+			if n.IsDeleted() {
+				fmt.Fprintf(out, "  [-]: %x\n", path)
+				continue
+			}
+			// Insertion or update
+			fmt.Fprintf(out, "  [+/*]: %x -> %v \n", path, n.Hash)
 		}
-		// Insertion or update
-		fmt.Fprintf(out, "  [+/*]: %x -> %v \n", path, n.Hash)
 	}
 	for _, n := range set.Leaves {
 		fmt.Fprintf(out, "[leaf]: %v\n", n)
@@ -184,7 +191,7 @@ func (set *MergedNodeSet) Merge(other *NodeSet) error {
 
 // Flatten returns a two-dimensional map for internal nodes.
 func (set *MergedNodeSet) Flatten() map[common.Hash]map[string]*Node {
-	nodes := make(map[common.Hash]map[string]*Node, len(set.Sets))
+	nodes := make(map[common.Hash]map[string]*Node)
 	for owner, set := range set.Sets {
 		nodes[owner] = set.Nodes
 	}

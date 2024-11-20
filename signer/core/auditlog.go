@@ -19,7 +19,6 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"os"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -27,6 +26,7 @@ import (
 	"github.com/ethereum/go-ethereum/internal/ethapi"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/signer/core/apitypes"
+	"golang.org/x/exp/slog"
 )
 
 type AuditLogger struct {

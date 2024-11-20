@@ -53,6 +53,7 @@ type Trie struct {
 	reader *trieReader
 
 	// tracer is the tool to track the trie changes.
+	// It will be reset after each commit operation.
 	tracer *tracer
 }
 
@@ -607,7 +608,8 @@ func (t *Trie) Hash() common.Hash {
 // The returned nodeset can be nil if the trie is clean (nothing to commit).
 // Once the trie is committed, it's not usable anymore. A new trie must
 // be created with new root and updated trie database for following usage
-func (t *Trie) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
+func (t *Trie) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet, error) {
+	defer t.tracer.reset()
 	defer func() {
 		t.committed = true
 	}()
@@ -618,13 +620,13 @@ func (t *Trie) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
 	if t.root == nil {
 		paths := t.tracer.deletedNodes()
 		if len(paths) == 0 {
-			return types.EmptyRootHash, nil // case (a)
+			return types.EmptyRootHash, nil, nil // case (a)
 		}
 		nodes := trienode.NewNodeSet(t.owner)
 		for _, path := range paths {
 			nodes.AddNode([]byte(path), trienode.NewDeleted())
 		}
-		return types.EmptyRootHash, nodes // case (b)
+		return types.EmptyRootHash, nodes, nil // case (b)
 	}
 	// Derive the hash for all dirty nodes first. We hold the assumption
 	// in the following procedure that all nodes are hashed.
@@ -636,14 +638,14 @@ func (t *Trie) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
 		// Replace the root node with the origin hash in order to
 		// ensure all resolved nodes are dropped after the commit.
 		t.root = hashedNode
-		return rootHash, nil
+		return rootHash, nil, nil
 	}
 	nodes := trienode.NewNodeSet(t.owner)
 	for _, path := range t.tracer.deletedNodes() {
 		nodes.AddNode([]byte(path), trienode.NewDeleted())
 	}
 	t.root = newCommitter(nodes, t.tracer, collectLeaf).Commit(t.root)
-	return rootHash, nodes
+	return rootHash, nodes, nil
 }
 
 // hashRoot calculates the root hash of the given trie
@@ -659,18 +661,6 @@ func (t *Trie) hashRoot() (node, node) {
 	}()
 	hashed, cached := h.hash(t.root, true)
 	return hashed, cached
-}
-
-// Witness returns a set containing all trie nodes that have been accessed.
-func (t *Trie) Witness() map[string]struct{} {
-	if len(t.tracer.accessList) == 0 {
-		return nil
-	}
-	witness := make(map[string]struct{}, len(t.tracer.accessList))
-	for _, node := range t.tracer.accessList {
-		witness[string(node)] = struct{}{}
-	}
-	return witness
 }
 
 // Reset drops the referenced root node and cleans all internal state.

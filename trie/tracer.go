@@ -17,8 +17,6 @@
 package trie
 
 import (
-	"maps"
-
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -94,13 +92,23 @@ func (t *tracer) reset() {
 
 // copy returns a deep copied tracer instance.
 func (t *tracer) copy() *tracer {
-	accessList := make(map[string][]byte, len(t.accessList))
+	var (
+		inserts    = make(map[string]struct{})
+		deletes    = make(map[string]struct{})
+		accessList = make(map[string][]byte)
+	)
+	for path := range t.inserts {
+		inserts[path] = struct{}{}
+	}
+	for path := range t.deletes {
+		deletes[path] = struct{}{}
+	}
 	for path, blob := range t.accessList {
 		accessList[path] = common.CopyBytes(blob)
 	}
 	return &tracer{
-		inserts:    maps.Clone(t.inserts),
-		deletes:    maps.Clone(t.deletes),
+		inserts:    inserts,
+		deletes:    deletes,
 		accessList: accessList,
 	}
 }

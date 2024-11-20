@@ -18,12 +18,7 @@ package discover
 
 import (
 	"crypto/ecdsa"
-	crand "crypto/rand"
-	"encoding/binary"
-	"math/rand"
 	"net"
-	"net/netip"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common/mclock"
@@ -35,8 +30,8 @@ import (
 
 // UDPConn is a network connection on which discovery can operate.
 type UDPConn interface {
-	ReadFromUDPAddrPort(b []byte) (n int, addr netip.AddrPort, err error)
-	WriteToUDPAddrPort(b []byte, addr netip.AddrPort) (n int, err error)
+	ReadFromUDP(b []byte) (n int, addr *net.UDPAddr, err error)
+	WriteToUDP(b []byte, addr *net.UDPAddr) (n int, err error)
 	Close() error
 	LocalAddr() net.Addr
 }
@@ -53,10 +48,9 @@ type Config struct {
 	Unhandled   chan<- ReadPacket // unhandled packets are sent on this channel
 
 	// Node table configuration:
-	Bootnodes               []*enode.Node // list of bootstrap nodes
-	PingInterval            time.Duration // speed of node liveness check
-	RefreshInterval         time.Duration // used in bucket refresh
-	NoFindnodeLivenessCheck bool          // turns off validation of table nodes in FINDNODE handler
+	Bootnodes       []*enode.Node // list of bootstrap nodes
+	PingInterval    time.Duration // speed of node liveness check
+	RefreshInterval time.Duration // used in bucket refresh
 
 	// The options below are useful in very specific cases, like in unit tests.
 	V5ProtocolID *[6]byte
@@ -68,7 +62,7 @@ type Config struct {
 func (cfg Config) withDefaults() Config {
 	// Node table configuration:
 	if cfg.PingInterval == 0 {
-		cfg.PingInterval = 3 * time.Second
+		cfg.PingInterval = 10 * time.Second
 	}
 	if cfg.RefreshInterval == 0 {
 		cfg.RefreshInterval = 30 * time.Minute
@@ -96,46 +90,12 @@ func ListenUDP(c UDPConn, ln *enode.LocalNode, cfg Config) (*UDPv4, error) {
 // channel if configured.
 type ReadPacket struct {
 	Data []byte
-	Addr netip.AddrPort
+	Addr *net.UDPAddr
 }
 
-type randomSource interface {
-	Intn(int) int
-	Int63n(int64) int64
-	Shuffle(int, func(int, int))
-}
-
-// reseedingRandom is a random number generator that tracks when it was last re-seeded.
-type reseedingRandom struct {
-	mu  sync.Mutex
-	cur *rand.Rand
-}
-
-func (r *reseedingRandom) seed() {
-	var b [8]byte
-	crand.Read(b[:])
-	seed := binary.BigEndian.Uint64(b[:])
-	new := rand.New(rand.NewSource(int64(seed)))
-
-	r.mu.Lock()
-	r.cur = new
-	r.mu.Unlock()
-}
-
-func (r *reseedingRandom) Intn(n int) int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cur.Intn(n)
-}
-
-func (r *reseedingRandom) Int63n(n int64) int64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.cur.Int63n(n)
-}
-
-func (r *reseedingRandom) Shuffle(n int, swap func(i, j int)) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.cur.Shuffle(n, swap)
+func min(x, y int) int {
+	if x > y {
+		return y
+	}
+	return x
 }

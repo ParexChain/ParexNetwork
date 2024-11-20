@@ -16,7 +16,13 @@
 
 package pathdb
 
-import "errors"
+import (
+	"errors"
+	"fmt"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/hexutil"
+)
 
 var (
 	// errDatabaseReadOnly is returned if the database is opened in read only mode
@@ -28,7 +34,7 @@ var (
 	errDatabaseWaitSync = errors.New("waiting for sync")
 
 	// errSnapshotStale is returned from data accessors if the underlying layer
-	// had been invalidated due to the chain progressing forward far enough
+	// layer had been invalidated due to the chain progressing forward far enough
 	// to not maintain the layer's original state.
 	errSnapshotStale = errors.New("layer stale")
 
@@ -39,4 +45,16 @@ var (
 	// errStateUnrecoverable is returned if state is required to be reverted to
 	// a destination without associated state history available.
 	errStateUnrecoverable = errors.New("state is unrecoverable")
+
+	// errUnexpectedNode is returned if the requested node with specified path is
+	// not hash matched with expectation.
+	errUnexpectedNode = errors.New("unexpected node")
 )
+
+func newUnexpectedNodeError(loc string, expHash common.Hash, gotHash common.Hash, owner common.Hash, path []byte, blob []byte) error {
+	blobHex := "nil"
+	if len(blob) > 0 {
+		blobHex = hexutil.Encode(blob)
+	}
+	return fmt.Errorf("%w, loc: %s, node: (%x %v), %x!=%x, blob: %s", errUnexpectedNode, loc, owner, path, expHash, gotHash, blobHex)
+}

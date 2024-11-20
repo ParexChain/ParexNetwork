@@ -22,7 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"maps"
 	"math/big"
 	"reflect"
 	"testing"
@@ -345,41 +344,6 @@ func TestTransactionCoding(t *testing.T) {
 	}
 }
 
-func TestLegacyTransaction_ConsistentV_LargeChainIds(t *testing.T) {
-	chainId := new(big.Int).SetUint64(13317435930671861669)
-
-	txdata := &LegacyTx{
-		Nonce:    1,
-		Gas:      1,
-		GasPrice: big.NewInt(2),
-		Data:     []byte("abcdef"),
-	}
-
-	key, err := crypto.GenerateKey()
-	if err != nil {
-		t.Fatalf("could not generate key: %v", err)
-	}
-
-	tx, err := SignNewTx(key, NewEIP2930Signer(chainId), txdata)
-	if err != nil {
-		t.Fatalf("could not sign transaction: %v", err)
-	}
-
-	// Make a copy of the initial V value
-	preV, _, _ := tx.RawSignatureValues()
-	preV = new(big.Int).Set(preV)
-
-	if tx.ChainId().Cmp(chainId) != 0 {
-		t.Fatalf("wrong chain id: %v", tx.ChainId())
-	}
-
-	v, _, _ := tx.RawSignatureValues()
-
-	if v.Cmp(preV) != 0 {
-		t.Fatalf("wrong v value: %v", v)
-	}
-}
-
 func encodeDecodeJSON(tx *Transaction) (*Transaction, error) {
 	data, err := json.Marshal(tx)
 	if err != nil {
@@ -414,7 +378,7 @@ func assertEqual(orig *Transaction, cpy *Transaction) error {
 	}
 	if orig.AccessList() != nil {
 		if !reflect.DeepEqual(orig.AccessList(), cpy.AccessList()) {
-			return errors.New("access list wrong")
+			return errors.New("access list wrong!")
 		}
 	}
 	return nil
@@ -551,7 +515,10 @@ func TestYParityJSONUnmarshalling(t *testing.T) {
 			test := test
 			t.Run(fmt.Sprintf("txType=%d: %s", txType, test.name), func(t *testing.T) {
 				// Copy the base json
-				testJson := maps.Clone(baseJson)
+				testJson := make(map[string]interface{})
+				for k, v := range baseJson {
+					testJson[k] = v
+				}
 
 				// Set v, yParity and type
 				if test.v != "" {

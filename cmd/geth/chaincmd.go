@@ -39,6 +39,7 @@ import (
 	"github.com/ethereum/go-ethereum/internal/flags"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/node"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/urfave/cli/v2"
 )
@@ -98,8 +99,6 @@ if one is set.  Otherwise it prints the genesis from the datadir.`,
 			utils.MetricsInfluxDBBucketFlag,
 			utils.MetricsInfluxDBOrganizationFlag,
 			utils.TxLookupLimitFlag,
-			utils.VMTraceFlag,
-			utils.VMTraceJsonConfigFlag,
 			utils.TransactionHistoryFlag,
 			utils.StateHistoryFlag,
 		}, utils.DatabaseFlags),
@@ -221,23 +220,22 @@ func initGenesis(ctx *cli.Context) error {
 		v := ctx.Uint64(utils.OverrideVerkle.Name)
 		overrides.OverrideVerkle = &v
 	}
+	for _, name := range []string{"chaindata", "lightchaindata"} {
+		chaindb, err := stack.OpenDatabaseWithFreezer(name, 0, 0, ctx.String(utils.AncientFlag.Name), "", false)
+		if err != nil {
+			utils.Fatalf("Failed to open database: %v", err)
+		}
+		defer chaindb.Close()
 
-	chaindb, err := stack.OpenDatabaseWithFreezer("chaindata", 0, 0, ctx.String(utils.AncientFlag.Name), "", false)
-	if err != nil {
-		utils.Fatalf("Failed to open database: %v", err)
+		triedb := utils.MakeTrieDatabase(ctx, chaindb, ctx.Bool(utils.CachePreimagesFlag.Name), false, genesis.IsVerkle())
+		defer triedb.Close()
+
+		_, hash, err := core.SetupGenesisBlockWithOverride(chaindb, triedb, genesis, &overrides)
+		if err != nil {
+			utils.Fatalf("Failed to write genesis block: %v", err)
+		}
+		log.Info("Successfully wrote genesis state", "database", name, "hash", hash)
 	}
-	defer chaindb.Close()
-
-	triedb := utils.MakeTrieDatabase(ctx, chaindb, ctx.Bool(utils.CachePreimagesFlag.Name), false, genesis.IsVerkle())
-	defer triedb.Close()
-
-	_, hash, err := core.SetupGenesisBlockWithOverride(chaindb, triedb, genesis, &overrides)
-	if err != nil {
-		utils.Fatalf("Failed to write genesis block: %v", err)
-	}
-
-	log.Info("Successfully wrote genesis state", "database", "chaindata", "hash", hash)
-
 	return nil
 }
 
@@ -259,22 +257,29 @@ func dumpGenesis(ctx *cli.Context) error {
 
 	// dump whatever already exists in the datadir
 	stack, _ := makeConfigNode(ctx)
+	for _, name := range []string{"chaindata", "lightchaindata"} {
+		db, err := stack.OpenDatabase(name, 0, 0, "", true)
+		if err != nil {
+			if !os.IsNotExist(err) {
+				return err
+			}
+			continue
+		}
+		genesis, err := core.ReadGenesis(db)
+		if err != nil {
+			utils.Fatalf("failed to read genesis: %s", err)
+		}
+		db.Close()
 
-	db, err := stack.OpenDatabase("chaindata", 0, 0, "", true)
-	if err != nil {
-		return err
+		if err := json.NewEncoder(os.Stdout).Encode(*genesis); err != nil {
+			utils.Fatalf("could not encode stored genesis: %s", err)
+		}
+		return nil
 	}
-	defer db.Close()
-
-	genesis, err = core.ReadGenesis(db)
-	if err != nil {
-		utils.Fatalf("failed to read genesis: %s", err)
+	if ctx.IsSet(utils.DataDirFlag.Name) {
+		utils.Fatalf("no existing datadir at %s", stack.Config().DataDir)
 	}
-
-	if err := json.NewEncoder(os.Stdout).Encode(*genesis); err != nil {
-		utils.Fatalf("could not encode stored genesis: %s", err)
-	}
-
+	utils.Fatalf("no network preset provided, and no genesis exists in the default datadir")
 	return nil
 }
 
@@ -330,7 +335,7 @@ func importChain(ctx *cli.Context) error {
 	fmt.Printf("Import done in %v.\n\n", time.Since(start))
 
 	// Output pre-compaction stats mostly to see the import trashing
-	showDBStats(db)
+	showLeveldbStats(db)
 
 	// Print the memory statistics used by the importing
 	mem := new(runtime.MemStats)
@@ -353,7 +358,7 @@ func importChain(ctx *cli.Context) error {
 	}
 	fmt.Printf("Compaction done in %v.\n\n", time.Since(start))
 
-	showDBStats(db)
+	showLeveldbStats(db)
 	return importErr
 }
 
@@ -419,6 +424,8 @@ func importHistory(ctx *cli.Context) error {
 			network = "mainnet"
 		case ctx.Bool(utils.SepoliaFlag.Name):
 			network = "sepolia"
+		case ctx.Bool(utils.GoerliFlag.Name):
+			network = "goerli"
 		}
 	} else {
 		// No network flag set, try to determine network based on files
@@ -437,7 +444,7 @@ func importHistory(ctx *cli.Context) error {
 			return fmt.Errorf("no era1 files found in %s", dir)
 		}
 		if len(networks) > 1 {
-			return errors.New("multiple networks found, use a network flag to specify desired network")
+			return fmt.Errorf("multiple networks found, use a network flag to specify desired network")
 		}
 		network = networks[0]
 	}
@@ -507,10 +514,13 @@ func importPreimages(ctx *cli.Context) error {
 	return nil
 }
 
-func parseDumpConfig(ctx *cli.Context, db ethdb.Database) (*state.DumpConfig, common.Hash, error) {
+func parseDumpConfig(ctx *cli.Context, stack *node.Node) (*state.DumpConfig, ethdb.Database, common.Hash, error) {
+	db := utils.MakeChainDatabase(ctx, stack, true)
+	defer db.Close()
+
 	var header *types.Header
 	if ctx.NArg() > 1 {
-		return nil, common.Hash{}, fmt.Errorf("expected 1 argument (number or hash), got %d", ctx.NArg())
+		return nil, nil, common.Hash{}, fmt.Errorf("expected 1 argument (number or hash), got %d", ctx.NArg())
 	}
 	if ctx.NArg() == 1 {
 		arg := ctx.Args().First()
@@ -519,17 +529,17 @@ func parseDumpConfig(ctx *cli.Context, db ethdb.Database) (*state.DumpConfig, co
 			if number := rawdb.ReadHeaderNumber(db, hash); number != nil {
 				header = rawdb.ReadHeader(db, hash, *number)
 			} else {
-				return nil, common.Hash{}, fmt.Errorf("block %x not found", hash)
+				return nil, nil, common.Hash{}, fmt.Errorf("block %x not found", hash)
 			}
 		} else {
 			number, err := strconv.ParseUint(arg, 10, 64)
 			if err != nil {
-				return nil, common.Hash{}, err
+				return nil, nil, common.Hash{}, err
 			}
 			if hash := rawdb.ReadCanonicalHash(db, number); hash != (common.Hash{}) {
 				header = rawdb.ReadHeader(db, hash, number)
 			} else {
-				return nil, common.Hash{}, fmt.Errorf("header for block %d not found", number)
+				return nil, nil, common.Hash{}, fmt.Errorf("header for block %d not found", number)
 			}
 		}
 	} else {
@@ -537,7 +547,7 @@ func parseDumpConfig(ctx *cli.Context, db ethdb.Database) (*state.DumpConfig, co
 		header = rawdb.ReadHeadHeader(db)
 	}
 	if header == nil {
-		return nil, common.Hash{}, errors.New("no head block found")
+		return nil, nil, common.Hash{}, errors.New("no head block found")
 	}
 	startArg := common.FromHex(ctx.String(utils.StartKeyFlag.Name))
 	var start common.Hash
@@ -549,9 +559,9 @@ func parseDumpConfig(ctx *cli.Context, db ethdb.Database) (*state.DumpConfig, co
 		start = crypto.Keccak256Hash(startArg)
 		log.Info("Converting start-address to hash", "address", common.BytesToAddress(startArg), "hash", start.Hex())
 	default:
-		return nil, common.Hash{}, fmt.Errorf("invalid start argument: %x. 20 or 32 hex-encoded bytes required", startArg)
+		return nil, nil, common.Hash{}, fmt.Errorf("invalid start argument: %x. 20 or 32 hex-encoded bytes required", startArg)
 	}
-	conf := &state.DumpConfig{
+	var conf = &state.DumpConfig{
 		SkipCode:          ctx.Bool(utils.ExcludeCodeFlag.Name),
 		SkipStorage:       ctx.Bool(utils.ExcludeStorageFlag.Name),
 		OnlyWithAddresses: !ctx.Bool(utils.IncludeIncompletesFlag.Name),
@@ -561,24 +571,21 @@ func parseDumpConfig(ctx *cli.Context, db ethdb.Database) (*state.DumpConfig, co
 	log.Info("State dump configured", "block", header.Number, "hash", header.Hash().Hex(),
 		"skipcode", conf.SkipCode, "skipstorage", conf.SkipStorage,
 		"start", hexutil.Encode(conf.Start), "limit", conf.Max)
-	return conf, header.Root, nil
+	return conf, db, header.Root, nil
 }
 
 func dump(ctx *cli.Context) error {
 	stack, _ := makeConfigNode(ctx)
 	defer stack.Close()
 
-	db := utils.MakeChainDatabase(ctx, stack, true)
-	defer db.Close()
-
-	conf, root, err := parseDumpConfig(ctx, db)
+	conf, db, root, err := parseDumpConfig(ctx, stack)
 	if err != nil {
 		return err
 	}
 	triedb := utils.MakeTrieDatabase(ctx, db, true, true, false) // always enable preimage lookup
 	defer triedb.Close()
 
-	state, err := state.New(root, state.NewDatabase(triedb, nil))
+	state, err := state.New(root, state.NewDatabaseWithNodeDB(db, triedb), nil)
 	if err != nil {
 		return err
 	}

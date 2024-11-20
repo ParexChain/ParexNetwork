@@ -129,7 +129,9 @@ func deriveKeys(hash hashFn, priv *ecdsa.PrivateKey, pub *ecdsa.PublicKey, n1, n
 	sec := session{writeKey: make([]byte, aesKeySize), readKey: make([]byte, aesKeySize)}
 	kdf.Read(sec.writeKey)
 	kdf.Read(sec.readKey)
-	clear(eph)
+	for i := range eph {
+		eph[i] = 0
+	}
 	return &sec
 }
 

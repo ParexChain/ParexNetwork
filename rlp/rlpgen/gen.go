@@ -158,7 +158,7 @@ type op interface {
 // basicOp handles basic types bool, uint*, string.
 type basicOp struct {
 	typ           types.Type
-	writeMethod   string     // EncoderBuffer writer method name
+	writeMethod   string     // calle write the value
 	writeArgType  types.Type // parameter type of writeMethod
 	decMethod     string
 	decResultType types.Type // return type of decMethod

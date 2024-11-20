@@ -31,6 +31,7 @@ import (
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/ethereum/go-ethereum/trie/trienode"
 	"github.com/ethereum/go-ethereum/triedb"
 )
 
@@ -352,14 +353,20 @@ func (dl *diskLayer) generateRange(ctx *generatorContext, trieId *trie.ID, prefi
 	// main account trie as a primary lookup when resolving hashes
 	var resolver trie.NodeResolver
 	if len(result.keys) > 0 {
-		tr := trie.NewEmpty(nil)
+		mdb := rawdb.NewMemoryDatabase()
+		tdb := triedb.NewDatabase(mdb, triedb.HashDefaults)
+		defer tdb.Close()
+		snapTrie := trie.NewEmpty(tdb)
 		for i, key := range result.keys {
-			tr.Update(key, result.vals[i])
+			snapTrie.Update(key, result.vals[i])
 		}
-		_, nodes := tr.Commit(false)
-		hashSet := nodes.HashSet()
+		root, nodes := snapTrie.Commit(false)
+		if nodes != nil {
+			tdb.Update(root, types.EmptyRootHash, 0, trienode.NewWithNodeSet(nodes), nil)
+			tdb.Commit(root, false)
+		}
 		resolver = func(owner common.Hash, path []byte, hash common.Hash) []byte {
-			return hashSet[hash]
+			return rawdb.ReadTrieNode(mdb, owner, path, hash, tdb.Scheme())
 		}
 	}
 	// Construct the trie for state iteration, reuse the trie

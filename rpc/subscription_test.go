@@ -33,8 +33,6 @@ import (
 )
 
 func TestNewID(t *testing.T) {
-	t.Parallel()
-
 	hexchars := "0123456789ABCDEFabcdef"
 	for i := 0; i < 100; i++ {
 		id := string(NewID())
@@ -56,8 +54,6 @@ func TestNewID(t *testing.T) {
 }
 
 func TestSubscriptions(t *testing.T) {
-	t.Parallel()
-
 	var (
 		namespaces        = []string{"eth", "bzz"}
 		service           = &notificationTestService{}
@@ -136,8 +132,6 @@ func TestSubscriptions(t *testing.T) {
 
 // This test checks that unsubscribing works.
 func TestServerUnsubscribe(t *testing.T) {
-	t.Parallel()
-
 	p1, p2 := net.Pipe()
 	defer p2.Close()
 
@@ -266,8 +260,6 @@ func BenchmarkNotify(b *testing.B) {
 }
 
 func TestNotify(t *testing.T) {
-	t.Parallel()
-
 	out := new(bytes.Buffer)
 	id := ID("test")
 	notifier := &Notifier{

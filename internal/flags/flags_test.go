@@ -17,12 +17,15 @@
 package flags
 
 import (
+	"os"
 	"os/user"
 	"runtime"
 	"testing"
 )
 
 func TestPathExpansion(t *testing.T) {
+	t.Parallel()
+
 	user, _ := user.Current()
 	var tests map[string]string
 
@@ -50,7 +53,7 @@ func TestPathExpansion(t *testing.T) {
 		}
 	}
 
-	t.Setenv(`DDDXXX`, `/tmp`)
+	os.Setenv(`DDDXXX`, `/tmp`)
 	for test, expected := range tests {
 		t.Run(test, func(t *testing.T) {
 			t.Parallel()

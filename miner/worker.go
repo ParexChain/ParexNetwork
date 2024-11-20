@@ -51,7 +51,6 @@ type environment struct {
 	tcount   int            // tx count in cycle
 	gasPool  *core.GasPool  // available gas used to pack transactions
 	coinbase common.Address
-	evm      *vm.EVM
 
 	header   *types.Header
 	txs      []*types.Transaction
@@ -77,7 +76,6 @@ type newPayloadResult struct {
 	sidecars []*types.BlobTxSidecar // collected blobs of blob transactions
 	stateDB  *state.StateDB         // StateDB after executing the transactions
 	receipts []*types.Receipt       // Receipts collected during construction
-	requests [][]byte               // Consensus layer requests collected during block construction
 	witness  *stateless.Witness     // Witness is an optional stateless proof
 }
 
@@ -117,28 +115,14 @@ func (miner *Miner) generateWork(params *generateParams, witness bool) *newPaylo
 	for _, r := range work.receipts {
 		allLogs = append(allLogs, r.Logs...)
 	}
-
-	// Collect consensus-layer requests if Prague is enabled.
-	var requests [][]byte
+	// Read requests if Prague is enabled.
 	if miner.chainConfig.IsPrague(work.header.Number, work.header.Time) {
-		// EIP-6110 deposits
-		depositRequests, err := core.ParseDepositLogs(allLogs, miner.chainConfig)
+		requests, err := core.ParseDepositLogs(allLogs, miner.chainConfig)
 		if err != nil {
 			return &newPayloadResult{err: err}
 		}
-		requests = append(requests, depositRequests)
-		// EIP-7002 withdrawals
-		withdrawalRequests := core.ProcessWithdrawalQueue(work.evm, work.state)
-		requests = append(requests, withdrawalRequests)
-		// EIP-7251 consolidations
-		consolidationRequests := core.ProcessConsolidationQueue(work.evm, work.state)
-		requests = append(requests, consolidationRequests)
+		body.Requests = requests
 	}
-	if requests != nil {
-		reqHash := types.CalcRequestsHash(requests)
-		work.header.RequestsHash = &reqHash
-	}
-
 	block, err := miner.engine.FinalizeAndAssemble(miner.chain, work.header, work.state, &body, work.receipts)
 	if err != nil {
 		return &newPayloadResult{err: err}
@@ -149,7 +133,6 @@ func (miner *Miner) generateWork(params *generateParams, witness bool) *newPaylo
 		sidecars: work.sidecars,
 		stateDB:  work.state,
 		receipts: work.receipts,
-		requests: requests,
 		witness:  work.witness,
 	}
 }
@@ -231,10 +214,14 @@ func (miner *Miner) prepareWork(genParams *generateParams, witness bool) (*envir
 		return nil, err
 	}
 	if header.ParentBeaconRoot != nil {
-		core.ProcessBeaconBlockRoot(*header.ParentBeaconRoot, env.evm, env.state)
+		context := core.NewEVMBlockContext(header, miner.chain, nil)
+		vmenv := vm.NewEVM(context, vm.TxContext{}, env.state, miner.chainConfig, vm.Config{})
+		core.ProcessBeaconBlockRoot(*header.ParentBeaconRoot, vmenv, env.state)
 	}
 	if miner.chainConfig.IsPrague(header.Number, header.Time) {
-		core.ProcessParentBlockHash(header.ParentHash, env.evm, env.state)
+		context := core.NewEVMBlockContext(header, miner.chain, nil)
+		vmenv := vm.NewEVM(context, vm.TxContext{}, env.state, miner.chainConfig, vm.Config{})
+		core.ProcessParentBlockHash(header.ParentHash, vmenv, env.state)
 	}
 	return env, nil
 }
@@ -260,7 +247,6 @@ func (miner *Miner) makeEnv(parent *types.Header, header *types.Header, coinbase
 		coinbase: coinbase,
 		header:   header,
 		witness:  state.Witness(),
-		evm:      vm.NewEVM(core.NewEVMBlockContext(header, miner.chain, &coinbase), state, miner.chainConfig, vm.Config{}),
 	}, nil
 }
 
@@ -309,7 +295,7 @@ func (miner *Miner) applyTransaction(env *environment, tx *types.Transaction) (*
 		snap = env.state.Snapshot()
 		gp   = env.gasPool.Gas()
 	)
-	receipt, err := core.ApplyTransaction(miner.chainConfig, env.evm, env.gasPool, env.state, env.header, tx, &env.header.GasUsed)
+	receipt, err := core.ApplyTransaction(miner.chainConfig, miner.chain, &env.coinbase, env.gasPool, env.state, env.header, tx, &env.header.GasUsed, vm.Config{})
 	if err != nil {
 		env.state.RevertToSnapshot(snap)
 		env.gasPool.SetGas(gp)

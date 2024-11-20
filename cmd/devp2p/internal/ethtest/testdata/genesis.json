@@ -18,6 +18,7 @@
     "shanghaiTime": 780,
     "cancunTime": 840,
     "terminalTotalDifficulty": 9454784,
+    "terminalTotalDifficultyPassed": true,
     "ethash": {}
   },
   "nonce": "0x0",

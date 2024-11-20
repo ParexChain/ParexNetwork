@@ -184,7 +184,9 @@ func StartClefAccountManager(ksLocation string, nousb, lightKDF bool, scpath str
 			}
 		}
 	}
-	return accounts.NewManager(nil, backends...)
+
+	// Clef doesn't allow insecure http account unlock.
+	return accounts.NewManager(&accounts.Config{InsecureUnlockAllowed: false}, backends...)
 }
 
 // MetadataFromContext extracts Metadata from a given context.Context

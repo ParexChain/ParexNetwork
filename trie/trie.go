@@ -49,9 +49,6 @@ type Trie struct {
 	// actually unhashed nodes.
 	unhashed int
 
-	// uncommitted is the number of updates since last commit.
-	uncommitted int
-
 	// reader is the handler trie can retrieve nodes from.
 	reader *trieReader
 
@@ -67,13 +64,12 @@ func (t *Trie) newFlag() nodeFlag {
 // Copy returns a copy of Trie.
 func (t *Trie) Copy() *Trie {
 	return &Trie{
-		root:        t.root,
-		owner:       t.owner,
-		committed:   t.committed,
-		reader:      t.reader,
-		tracer:      t.tracer.copy(),
-		uncommitted: t.uncommitted,
-		unhashed:    t.unhashed,
+		root:      t.root,
+		owner:     t.owner,
+		committed: t.committed,
+		unhashed:  t.unhashed,
+		reader:    t.reader,
+		tracer:    t.tracer.copy(),
 	}
 }
 
@@ -83,7 +79,7 @@ func (t *Trie) Copy() *Trie {
 // zero hash or the sha3 hash of an empty string, then trie is initially
 // empty, otherwise, the root node must be present in database or returns
 // a MissingNodeError if not.
-func New(id *ID, db database.NodeDatabase) (*Trie, error) {
+func New(id *ID, db database.Database) (*Trie, error) {
 	reader, err := newTrieReader(id.StateRoot, id.Owner, db)
 	if err != nil {
 		return nil, err
@@ -104,7 +100,7 @@ func New(id *ID, db database.NodeDatabase) (*Trie, error) {
 }
 
 // NewEmpty is a shortcut to create empty tree. It's mostly used in tests.
-func NewEmpty(db database.NodeDatabase) *Trie {
+func NewEmpty(db database.Database) *Trie {
 	tr, _ := New(TrieID(types.EmptyRootHash), db)
 	return tr
 }
@@ -313,7 +309,6 @@ func (t *Trie) Update(key, value []byte) error {
 
 func (t *Trie) update(key, value []byte) error {
 	t.unhashed++
-	t.uncommitted++
 	k := keybytesToHex(key)
 	if len(value) != 0 {
 		_, n, err := t.insert(t.root, nil, k, valueNode(value))
@@ -427,7 +422,6 @@ func (t *Trie) Delete(key []byte) error {
 	if t.committed {
 		return ErrCommitted
 	}
-	t.uncommitted++
 	t.unhashed++
 	k := keybytesToHex(key)
 	_, n, err := t.delete(t.root, nil, k)
@@ -648,9 +642,7 @@ func (t *Trie) Commit(collectLeaf bool) (common.Hash, *trienode.NodeSet) {
 	for _, path := range t.tracer.deletedNodes() {
 		nodes.AddNode([]byte(path), trienode.NewDeleted())
 	}
-	// If the number of changes is below 100, we let one thread handle it
-	t.root = newCommitter(nodes, t.tracer, collectLeaf).Commit(t.root, t.uncommitted > 100)
-	t.uncommitted = 0
+	t.root = newCommitter(nodes, t.tracer, collectLeaf).Commit(t.root)
 	return rootHash, nodes
 }
 
@@ -686,7 +678,6 @@ func (t *Trie) Reset() {
 	t.root = nil
 	t.owner = common.Hash{}
 	t.unhashed = 0
-	t.uncommitted = 0
 	t.tracer.reset()
 	t.committed = false
 }

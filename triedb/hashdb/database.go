@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
 	"github.com/ethereum/go-ethereum/trie/trienode"
+	"github.com/ethereum/go-ethereum/trie/triestate"
 	"github.com/ethereum/go-ethereum/triedb/database"
 )
 
@@ -540,7 +541,7 @@ func (db *Database) Initialized(genesisRoot common.Hash) bool {
 
 // Update inserts the dirty nodes in provided nodeset into database and link the
 // account trie with multiple storage tries if necessary.
-func (db *Database) Update(root common.Hash, parent common.Hash, block uint64, nodes *trienode.MergedNodeSet) error {
+func (db *Database) Update(root common.Hash, parent common.Hash, block uint64, nodes *trienode.MergedNodeSet, states *triestate.Set) error {
 	// Ensure the parent state is present and signal a warning if not.
 	if parent != types.EmptyRootHash {
 		if blob, _ := db.node(parent); len(blob) == 0 {
@@ -615,9 +616,9 @@ func (db *Database) Close() error {
 	return nil
 }
 
-// NodeReader returns a reader for accessing trie nodes within the specified state.
-// An error will be returned if the specified state is not available.
-func (db *Database) NodeReader(root common.Hash) (database.NodeReader, error) {
+// Reader retrieves a node reader belonging to the given state root.
+// An error will be returned if the requested state is not available.
+func (db *Database) Reader(root common.Hash) (database.Reader, error) {
 	if _, err := db.node(root); err != nil {
 		return nil, fmt.Errorf("state %#x is not available, %v", root, err)
 	}

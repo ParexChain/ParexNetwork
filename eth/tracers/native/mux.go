@@ -24,7 +24,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/tracing"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/tracers"
-	"github.com/ethereum/go-ethereum/params"
 )
 
 func init() {
@@ -39,15 +38,17 @@ type muxTracer struct {
 }
 
 // newMuxTracer returns a new mux tracer.
-func newMuxTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *params.ChainConfig) (*tracers.Tracer, error) {
+func newMuxTracer(ctx *tracers.Context, cfg json.RawMessage) (*tracers.Tracer, error) {
 	var config map[string]json.RawMessage
-	if err := json.Unmarshal(cfg, &config); err != nil {
-		return nil, err
+	if cfg != nil {
+		if err := json.Unmarshal(cfg, &config); err != nil {
+			return nil, err
+		}
 	}
 	objects := make([]*tracers.Tracer, 0, len(config))
 	names := make([]string, 0, len(config))
 	for k, v := range config {
-		t, err := tracers.DefaultDirectory.New(k, ctx, v, chainConfig)
+		t, err := tracers.DefaultDirectory.New(k, ctx, v)
 		if err != nil {
 			return nil, err
 		}

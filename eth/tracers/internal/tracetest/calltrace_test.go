@@ -29,12 +29,12 @@ import (
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
-	"github.com/ethereum/go-ethereum/core/state"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth/tracers"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/tests"
 )
 
@@ -96,6 +96,7 @@ func testCallTracer(tracerName string, dirPath string, t *testing.T) {
 		if !strings.HasSuffix(file.Name(), ".json") {
 			continue
 		}
+		file := file // capture range variable
 		t.Run(camel(strings.TrimSuffix(file.Name(), ".json")), func(t *testing.T) {
 			t.Parallel()
 
@@ -116,24 +117,21 @@ func testCallTracer(tracerName string, dirPath string, t *testing.T) {
 			var (
 				signer  = types.MakeSigner(test.Genesis.Config, new(big.Int).SetUint64(uint64(test.Context.Number)), uint64(test.Context.Time))
 				context = test.Context.toBlockContext(test.Genesis)
-				st      = tests.MakePreState(rawdb.NewMemoryDatabase(), test.Genesis.Alloc, false, rawdb.HashScheme)
+				state   = tests.MakePreState(rawdb.NewMemoryDatabase(), test.Genesis.Alloc, false, rawdb.HashScheme)
 			)
-			st.Close()
+			state.Close()
 
-			tracer, err := tracers.DefaultDirectory.New(tracerName, new(tracers.Context), test.TracerConfig, test.Genesis.Config)
+			tracer, err := tracers.DefaultDirectory.New(tracerName, new(tracers.Context), test.TracerConfig)
 			if err != nil {
 				t.Fatalf("failed to create call tracer: %v", err)
 			}
-			logState := vm.StateDB(st.StateDB)
-			if tracer.Hooks != nil {
-				logState = state.NewHookedState(st.StateDB, tracer.Hooks)
-			}
+
+			state.StateDB.SetLogger(tracer.Hooks)
 			msg, err := core.TransactionToMessage(tx, signer, context.BaseFee)
 			if err != nil {
 				t.Fatalf("failed to prepare transaction for tracing: %v", err)
 			}
-			evm := vm.NewEVM(context, logState, test.Genesis.Config, vm.Config{Tracer: tracer.Hooks})
-			evm.SetTxContext(core.NewEVMTxContext(msg))
+			evm := vm.NewEVM(context, core.NewEVMTxContext(msg), state.StateDB, test.Genesis.Config, vm.Config{Tracer: tracer.Hooks})
 			tracer.OnTxStart(evm.GetVMContext(), tx, msg.From)
 			vmRet, err := core.ApplyMessage(evm, msg, new(core.GasPool).AddGas(tx.Gas()))
 			if err != nil {
@@ -185,6 +183,7 @@ func BenchmarkTracers(b *testing.B) {
 		if !strings.HasSuffix(file.Name(), ".json") {
 			continue
 		}
+		file := file // capture range variable
 		b.Run(camel(strings.TrimSuffix(file.Name(), ".json")), func(b *testing.B) {
 			blob, err := os.ReadFile(filepath.Join("testdata", "call_tracer", file.Name()))
 			if err != nil {
@@ -202,7 +201,7 @@ func BenchmarkTracers(b *testing.B) {
 func benchTracer(tracerName string, test *callTracerTest, b *testing.B) {
 	// Configure a blockchain with the given prestate
 	tx := new(types.Transaction)
-	if err := tx.UnmarshalBinary(common.FromHex(test.Input)); err != nil {
+	if err := rlp.DecodeBytes(common.FromHex(test.Input), tx); err != nil {
 		b.Fatalf("failed to parse testcase input: %v", err)
 	}
 	signer := types.MakeSigner(test.Genesis.Config, new(big.Int).SetUint64(uint64(test.Context.Number)), uint64(test.Context.Time))
@@ -211,7 +210,15 @@ func benchTracer(tracerName string, test *callTracerTest, b *testing.B) {
 		Origin:   origin,
 		GasPrice: tx.GasPrice(),
 	}
-	context := test.Context.toBlockContext(test.Genesis)
+	context := vm.BlockContext{
+		CanTransfer: core.CanTransfer,
+		Transfer:    core.Transfer,
+		Coinbase:    test.Context.Miner,
+		BlockNumber: new(big.Int).SetUint64(uint64(test.Context.Number)),
+		Time:        uint64(test.Context.Time),
+		Difficulty:  (*big.Int)(test.Context.Difficulty),
+		GasLimit:    uint64(test.Context.GasLimit),
+	}
 	msg, err := core.TransactionToMessage(tx, signer, context.BaseFee)
 	if err != nil {
 		b.Fatalf("failed to prepare transaction for tracing: %v", err)
@@ -221,15 +228,12 @@ func benchTracer(tracerName string, test *callTracerTest, b *testing.B) {
 
 	b.ReportAllocs()
 	b.ResetTimer()
-
-	tracer, err := tracers.DefaultDirectory.New(tracerName, new(tracers.Context), nil, test.Genesis.Config)
-	if err != nil {
-		b.Fatalf("failed to create call tracer: %v", err)
-	}
-	evm := vm.NewEVM(context, state.StateDB, test.Genesis.Config, vm.Config{Tracer: tracer.Hooks})
-	evm.SetTxContext(txContext)
-
 	for i := 0; i < b.N; i++ {
+		tracer, err := tracers.DefaultDirectory.New(tracerName, new(tracers.Context), nil)
+		if err != nil {
+			b.Fatalf("failed to create call tracer: %v", err)
+		}
+		evm := vm.NewEVM(context, txContext, state.StateDB, test.Genesis.Config, vm.Config{Tracer: tracer.Hooks})
 		snap := state.StateDB.Snapshot()
 		st := core.NewStateTransition(evm, msg, new(core.GasPool).AddGas(tx.Gas()))
 		if _, err = st.TransitionDb(); err != nil {
@@ -262,7 +266,7 @@ func TestInternals(t *testing.T) {
 		}
 	)
 	mkTracer := func(name string, cfg json.RawMessage) *tracers.Tracer {
-		tr, err := tracers.DefaultDirectory.New(name, nil, cfg, config)
+		tr, err := tracers.DefaultDirectory.New(name, nil, cfg)
 		if err != nil {
 			t.Fatalf("failed to create call tracer: %v", err)
 		}
@@ -347,7 +351,7 @@ func TestInternals(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			st := tests.MakePreState(rawdb.NewMemoryDatabase(),
+			state := tests.MakePreState(rawdb.NewMemoryDatabase(),
 				types.GenesisAlloc{
 					to: types.Account{
 						Code: tc.code,
@@ -356,13 +360,8 @@ func TestInternals(t *testing.T) {
 						Balance: big.NewInt(500000000000000),
 					},
 				}, false, rawdb.HashScheme)
-			defer st.Close()
-
-			logState := vm.StateDB(st.StateDB)
-			if hooks := tc.tracer.Hooks; hooks != nil {
-				logState = state.NewHookedState(st.StateDB, hooks)
-			}
-
+			defer state.Close()
+			state.StateDB.SetLogger(tc.tracer.Hooks)
 			tx, err := types.SignNewTx(key, signer, &types.LegacyTx{
 				To:       &to,
 				Value:    big.NewInt(0),
@@ -376,8 +375,7 @@ func TestInternals(t *testing.T) {
 				Origin:   origin,
 				GasPrice: tx.GasPrice(),
 			}
-			evm := vm.NewEVM(context, logState, config, vm.Config{Tracer: tc.tracer.Hooks})
-			evm.SetTxContext(txContext)
+			evm := vm.NewEVM(context, txContext, state.StateDB, config, vm.Config{Tracer: tc.tracer.Hooks})
 			msg, err := core.TransactionToMessage(tx, signer, big.NewInt(0))
 			if err != nil {
 				t.Fatalf("test %v: failed to create message: %v", tc.name, err)

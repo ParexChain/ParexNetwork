@@ -116,13 +116,12 @@ type EVM struct {
 	precompiles map[common.Address]PrecompiledContract
 }
 
-// NewEVM constructs an EVM instance with the supplied block context, state
-// database and several configs. It meant to be used throughout the entire
-// state transition of a block, with the transaction context switched as
-// needed by calling evm.SetTxContext.
-func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainConfig, config Config) *EVM {
+// NewEVM returns a new EVM. The returned EVM is not thread safe and should
+// only ever be used *once*.
+func NewEVM(blockCtx BlockContext, txCtx TxContext, statedb StateDB, chainConfig *params.ChainConfig, config Config) *EVM {
 	evm := &EVM{
 		Context:     blockCtx,
+		TxContext:   txCtx,
 		StateDB:     statedb,
 		Config:      config,
 		chainConfig: chainConfig,
@@ -133,11 +132,6 @@ func NewEVM(blockCtx BlockContext, statedb StateDB, chainConfig *params.ChainCon
 	return evm
 }
 
-// SetTracer sets the tracer for following state transition.
-func (evm *EVM) SetTracer(tracer *tracing.Hooks) {
-	evm.Config.Tracer = tracer
-}
-
 // SetPrecompiles sets the precompiled contracts for the EVM.
 // This method is only used through RPC calls.
 // It is not thread-safe.
@@ -145,13 +139,14 @@ func (evm *EVM) SetPrecompiles(precompiles PrecompiledContracts) {
 	evm.precompiles = precompiles
 }
 
-// SetTxContext resets the EVM with a new transaction context.
+// Reset resets the EVM with a new transaction context.Reset
 // This is not threadsafe and should only be done very cautiously.
-func (evm *EVM) SetTxContext(txCtx TxContext) {
+func (evm *EVM) Reset(txCtx TxContext, statedb StateDB) {
 	if evm.chainRules.IsEIP4762 {
-		txCtx.AccessEvents = state.NewAccessEvents(evm.StateDB.PointCache())
+		txCtx.AccessEvents = state.NewAccessEvents(statedb.PointCache())
 	}
 	evm.TxContext = txCtx
+	evm.StateDB = statedb
 }
 
 // Cancel cancels any running EVM operation. This may be called concurrently and
@@ -218,6 +213,9 @@ func (evm *EVM) Call(caller ContractRef, addr common.Address, input []byte, gas 
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
 		code := evm.StateDB.GetCode(addr)
+		if witness := evm.StateDB.Witness(); witness != nil {
+			witness.AddCode(code)
+		}
 		if len(code) == 0 {
 			ret, err = nil, nil // gas is unchanged
 		} else {
@@ -285,6 +283,9 @@ func (evm *EVM) CallCode(caller ContractRef, addr common.Address, input []byte, 
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
 		contract := NewContract(caller, AccountRef(caller.Address()), value, gas)
+		if witness := evm.StateDB.Witness(); witness != nil {
+			witness.AddCode(evm.StateDB.GetCode(addrCopy))
+		}
 		contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), evm.StateDB.GetCode(addrCopy))
 		ret, err = evm.interpreter.Run(contract, input, false)
 		gas = contract.Gas
@@ -332,6 +333,9 @@ func (evm *EVM) DelegateCall(caller ContractRef, addr common.Address, input []by
 		addrCopy := addr
 		// Initialise a new contract and make initialise the delegate values
 		contract := NewContract(caller, AccountRef(caller.Address()), nil, gas).AsDelegate()
+		if witness := evm.StateDB.Witness(); witness != nil {
+			witness.AddCode(evm.StateDB.GetCode(addrCopy))
+		}
 		contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), evm.StateDB.GetCode(addrCopy))
 		ret, err = evm.interpreter.Run(contract, input, false)
 		gas = contract.Gas
@@ -387,6 +391,9 @@ func (evm *EVM) StaticCall(caller ContractRef, addr common.Address, input []byte
 		// Initialise a new contract and set the code that is to be used by the EVM.
 		// The contract is a scoped environment for this execution context only.
 		contract := NewContract(caller, AccountRef(addrCopy), new(uint256.Int), gas)
+		if witness := evm.StateDB.Witness(); witness != nil {
+			witness.AddCode(evm.StateDB.GetCode(addrCopy))
+		}
 		contract.SetCallCode(&addrCopy, evm.StateDB.GetCodeHash(addrCopy), evm.StateDB.GetCode(addrCopy))
 		// When an error was returned by the EVM or when setting the creation code
 		// above we revert to the snapshot and consume any gas remaining. Additionally
@@ -606,6 +613,7 @@ func (evm *EVM) GetVMContext() *tracing.VMContext {
 		Time:        evm.Context.Time,
 		Random:      evm.Context.Random,
 		GasPrice:    evm.TxContext.GasPrice,
+		ChainConfig: evm.ChainConfig(),
 		StateDB:     evm.StateDB,
 	}
 }

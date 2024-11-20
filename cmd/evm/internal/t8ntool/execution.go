@@ -23,7 +23,6 @@ import (
 	"math/big"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/consensus/ethash"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -51,8 +50,6 @@ type Prestate struct {
 	Pre types.GenesisAlloc `json:"pre"`
 }
 
-//go:generate go run github.com/fjl/gencodec -type ExecutionResult -field-override executionResultMarshaling -out gen_execresult.go
-
 // ExecutionResult contains the execution status after running a state test, any
 // error that might have occurred and a dump of the final state if requested.
 type ExecutionResult struct {
@@ -69,12 +66,8 @@ type ExecutionResult struct {
 	WithdrawalsRoot      *common.Hash          `json:"withdrawalsRoot,omitempty"`
 	CurrentExcessBlobGas *math.HexOrDecimal64  `json:"currentExcessBlobGas,omitempty"`
 	CurrentBlobGasUsed   *math.HexOrDecimal64  `json:"blobGasUsed,omitempty"`
-	RequestsHash         *common.Hash          `json:"requestsHash,omitempty"`
-	Requests             [][]byte              `json:"requests,omitempty"`
-}
-
-type executionResultMarshaling struct {
-	Requests []hexutil.Bytes `json:"requests,omitempty"`
+	RequestsHash         *common.Hash          `json:"requestsRoot,omitempty"`
+	DepositRequests      *types.Deposits       `json:"depositRequests,omitempty"`
 }
 
 type ommer struct {
@@ -132,7 +125,7 @@ type rejectedTx struct {
 // Apply applies a set of transactions to a pre-state
 func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 	txIt txIterator, miningReward int64,
-	getTracerFn func(txIndex int, txHash common.Hash, chainConfig *params.ChainConfig) (*tracers.Tracer, io.WriteCloser, error)) (*state.StateDB, *ExecutionResult, []byte, error) {
+	getTracerFn func(txIndex int, txHash common.Hash) (*tracers.Tracer, io.WriteCloser, error)) (*state.StateDB, *ExecutionResult, []byte, error) {
 	// Capture errors for BLOCKHASH operation, if we haven't been supplied the
 	// required blockhashes
 	var hashError error
@@ -201,14 +194,15 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		chainConfig.DAOForkBlock.Cmp(new(big.Int).SetUint64(pre.Env.Number)) == 0 {
 		misc.ApplyDAOHardFork(statedb)
 	}
-	evm := vm.NewEVM(vmContext, statedb, chainConfig, vmConfig)
 	if beaconRoot := pre.Env.ParentBeaconBlockRoot; beaconRoot != nil {
+		evm := vm.NewEVM(vmContext, vm.TxContext{}, statedb, chainConfig, vmConfig)
 		core.ProcessBeaconBlockRoot(*beaconRoot, evm, statedb)
 	}
 	if pre.Env.BlockHashes != nil && chainConfig.IsPrague(new(big.Int).SetUint64(pre.Env.Number), pre.Env.Timestamp) {
 		var (
 			prevNumber = pre.Env.Number - 1
 			prevHash   = pre.Env.BlockHashes[math.HexOrDecimal64(prevNumber)]
+			evm        = vm.NewEVM(vmContext, vm.TxContext{}, statedb, chainConfig, vmConfig)
 		)
 		core.ProcessParentBlockHash(prevHash, evm, statedb)
 	}
@@ -241,14 +235,12 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 				continue
 			}
 		}
-		tracer, traceOutput, err := getTracerFn(txIndex, tx.Hash(), chainConfig)
+		tracer, traceOutput, err := getTracerFn(txIndex, tx.Hash())
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		// TODO (rjl493456442) it's a bit weird to reset the tracer in the
-		// middle of block execution, please improve it somehow.
 		if tracer != nil {
-			evm.SetTracer(tracer.Hooks)
+			vmConfig.Tracer = tracer.Hooks
 		}
 		statedb.SetTxContext(tx.Hash(), txIndex)
 
@@ -257,12 +249,12 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 			snapshot  = statedb.Snapshot()
 			prevGas   = gaspool.Gas()
 		)
+		evm := vm.NewEVM(vmContext, txContext, statedb, chainConfig, vmConfig)
+
 		if tracer != nil && tracer.OnTxStart != nil {
 			tracer.OnTxStart(evm.GetVMContext(), tx, msg.From)
 		}
 		// (ret []byte, usedGas uint64, failed bool, err error)
-
-		evm.SetTxContext(txContext)
 		msgResult, err := core.ApplyMessage(evm, msg, gaspool)
 		if err != nil {
 			statedb.RevertToSnapshot(snapshot)
@@ -362,27 +354,6 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		amount := new(big.Int).Mul(new(big.Int).SetUint64(w.Amount), big.NewInt(params.GWei))
 		statedb.AddBalance(w.Address, uint256.MustFromBig(amount), tracing.BalanceIncreaseWithdrawal)
 	}
-
-	// Gather the execution-layer triggered requests.
-	var requests [][]byte
-	if chainConfig.IsPrague(vmContext.BlockNumber, vmContext.Time) {
-		// EIP-6110 deposits
-		var allLogs []*types.Log
-		for _, receipt := range receipts {
-			allLogs = append(allLogs, receipt.Logs...)
-		}
-		depositRequests, err := core.ParseDepositLogs(allLogs, chainConfig)
-		if err != nil {
-			return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("could not parse requests logs: %v", err))
-		}
-		requests = append(requests, depositRequests)
-
-		// EIP-7002 withdrawals
-		requests = append(requests, core.ProcessWithdrawalQueue(evm, statedb))
-		// EIP-7251 consolidations
-		requests = append(requests, core.ProcessConsolidationQueue(evm, statedb))
-	}
-
 	// Commit block
 	root, err := statedb.Commit(vmContext.BlockNumber.Uint64(), chainConfig.IsEIP158(vmContext.BlockNumber))
 	if err != nil {
@@ -408,17 +379,28 @@ func (pre *Prestate) Apply(vmConfig vm.Config, chainConfig *params.ChainConfig,
 		execRs.CurrentExcessBlobGas = (*math.HexOrDecimal64)(&excessBlobGas)
 		execRs.CurrentBlobGasUsed = (*math.HexOrDecimal64)(&blobGasUsed)
 	}
-	if requests != nil {
-		// Set requestsHash on block.
-		h := types.CalcRequestsHash(requests)
-		execRs.RequestsHash = &h
-		for i := range requests {
-			// remove prefix
-			requests[i] = requests[i][1:]
+	if chainConfig.IsPrague(vmContext.BlockNumber, vmContext.Time) {
+		// Parse the requests from the logs
+		var allLogs []*types.Log
+		for _, receipt := range receipts {
+			allLogs = append(allLogs, receipt.Logs...)
 		}
-		execRs.Requests = requests
+		requests, err := core.ParseDepositLogs(allLogs, chainConfig)
+		if err != nil {
+			return nil, nil, nil, NewError(ErrorEVM, fmt.Errorf("could not parse requests logs: %v", err))
+		}
+		// Calculate the requests root
+		h := types.DeriveSha(requests, trie.NewStackTrie(nil))
+		execRs.RequestsHash = &h
+		// Get the deposits from the requests
+		deposits := make(types.Deposits, 0)
+		for _, req := range requests {
+			if dep, ok := req.Inner().(*types.Deposit); ok {
+				deposits = append(deposits, dep)
+			}
+		}
+		execRs.DepositRequests = &deposits
 	}
-
 	// Re-create statedb instance with new root upon the updated database
 	// for accessing latest states.
 	statedb, err = state.New(root, statedb.Database())

@@ -58,9 +58,8 @@ const freezerTableSize = 2 * 1000 * 1000 * 1000
 // - The append-only nature ensures that disk writes are minimized.
 // - The in-order data ensures that disk reads are always optimized.
 type Freezer struct {
-	datadir string
-	frozen  atomic.Uint64 // Number of items already frozen
-	tail    atomic.Uint64 // Number of the first stored item in the freezer
+	frozen atomic.Uint64 // Number of items already frozen
+	tail   atomic.Uint64 // Number of the first stored item in the freezer
 
 	// This lock synchronizes writers and the truncate operation, as well as
 	// the "atomic" (batched) read operations.
@@ -110,7 +109,6 @@ func NewFreezer(datadir string, namespace string, readonly bool, maxTableSize ui
 	}
 	// Open all the supported data tables
 	freezer := &Freezer{
-		datadir:      datadir,
 		readonly:     readonly,
 		tables:       make(map[string]*freezerTable),
 		instanceLock: lock,
@@ -172,11 +170,6 @@ func (f *Freezer) Close() error {
 		return fmt.Errorf("%v", errs)
 	}
 	return nil
-}
-
-// AncientDatadir returns the path of the ancient store.
-func (f *Freezer) AncientDatadir() (string, error) {
-	return f.datadir, nil
 }
 
 // HasAncient returns an indicator whether the specified ancient data exists

@@ -219,7 +219,7 @@ func (s *Service) loop(chainHeadCh chan core.ChainHeadEvent, txEventCh chan core
 	// Start a goroutine that exhausts the subscriptions to avoid events piling up
 	var (
 		quitCh = make(chan struct{})
-		headCh = make(chan *types.Header, 1)
+		headCh = make(chan *types.Block, 1)
 		txCh   = make(chan struct{}, 1)
 	)
 	go func() {
@@ -231,7 +231,7 @@ func (s *Service) loop(chainHeadCh chan core.ChainHeadEvent, txEventCh chan core
 			// Notify of chain head events, but drop if too frequent
 			case head := <-chainHeadCh:
 				select {
-				case headCh <- head.Header:
+				case headCh <- head.Block:
 				default:
 				}
 
@@ -602,9 +602,9 @@ func (s uncleStats) MarshalJSON() ([]byte, error) {
 }
 
 // reportBlock retrieves the current chain head and reports it to the stats server.
-func (s *Service) reportBlock(conn *connWrapper, header *types.Header) error {
+func (s *Service) reportBlock(conn *connWrapper, block *types.Block) error {
 	// Gather the block details from the header or block chain
-	details := s.assembleBlockStats(header)
+	details := s.assembleBlockStats(block)
 
 	// Short circuit if the block detail is not available.
 	if details == nil {
@@ -625,9 +625,10 @@ func (s *Service) reportBlock(conn *connWrapper, header *types.Header) error {
 
 // assembleBlockStats retrieves any required metadata to report a single block
 // and assembles the block stats. If block is nil, the current head is processed.
-func (s *Service) assembleBlockStats(header *types.Header) *blockStats {
+func (s *Service) assembleBlockStats(block *types.Block) *blockStats {
 	// Gather the block infos from the local blockchain
 	var (
+		header *types.Header
 		td     *big.Int
 		txs    []txStats
 		uncles []*types.Header
@@ -637,13 +638,16 @@ func (s *Service) assembleBlockStats(header *types.Header) *blockStats {
 	fullBackend, ok := s.backend.(fullNodeBackend)
 	if ok {
 		// Retrieve current chain head if no block is given.
-		if header == nil {
-			header = fullBackend.CurrentBlock()
+		if block == nil {
+			head := fullBackend.CurrentBlock()
+			block, _ = fullBackend.BlockByNumber(context.Background(), rpc.BlockNumber(head.Number.Uint64()))
 		}
-		block, _ := fullBackend.BlockByNumber(context.Background(), rpc.BlockNumber(header.Number.Uint64()))
+		// Short circuit if no block is available. It might happen when
+		// the blockchain is reorging.
 		if block == nil {
 			return nil
 		}
+		header = block.Header()
 		td = fullBackend.GetTd(context.Background(), header.Hash())
 
 		txs = make([]txStats, len(block.Transactions()))
@@ -653,12 +657,15 @@ func (s *Service) assembleBlockStats(header *types.Header) *blockStats {
 		uncles = block.Uncles()
 	} else {
 		// Light nodes would need on-demand lookups for transactions/uncles, skip
-		if header == nil {
+		if block != nil {
+			header = block.Header()
+		} else {
 			header = s.backend.CurrentHeader()
 		}
 		td = s.backend.GetTd(context.Background(), header.Hash())
 		txs = []txStats{}
 	}
+
 	// Assemble and return the block stats
 	author, _ := s.engine.Author(header)
 
@@ -701,10 +708,19 @@ func (s *Service) reportHistory(conn *connWrapper, list []uint64) error {
 	// Gather the batch of blocks to report
 	history := make([]*blockStats, len(indexes))
 	for i, number := range indexes {
+		fullBackend, ok := s.backend.(fullNodeBackend)
 		// Retrieve the next block if it's known to us
-		header, _ := s.backend.HeaderByNumber(context.Background(), rpc.BlockNumber(number))
-		if header != nil {
-			history[len(history)-1-i] = s.assembleBlockStats(header)
+		var block *types.Block
+		if ok {
+			block, _ = fullBackend.BlockByNumber(context.Background(), rpc.BlockNumber(number)) // TODO ignore error here ?
+		} else {
+			if header, _ := s.backend.HeaderByNumber(context.Background(), rpc.BlockNumber(number)); header != nil {
+				block = types.NewBlockWithHeader(header)
+			}
+		}
+		// If we do have the block, add to the history and continue
+		if block != nil {
+			history[len(history)-1-i] = s.assembleBlockStats(block)
 			continue
 		}
 		// Ran out of blocks, cut the report short and send

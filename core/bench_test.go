@@ -29,7 +29,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -81,15 +80,9 @@ var (
 // value-transfer transaction with n bytes of extra data in each
 // block.
 func genValueTx(nbytes int) func(int, *BlockGen) {
-	// We can reuse the data for all transactions.
-	// During signing, the method tx.WithSignature(s, sig)
-	// performs:
-	// 	cpy := tx.inner.copy()
-	//	cpy.setSignatureValues(signer.ChainID(), v, r, s)
-	// After this operation, the data can be reused by the caller.
-	data := make([]byte, nbytes)
 	return func(i int, gen *BlockGen) {
 		toaddr := common.Address{}
+		data := make([]byte, nbytes)
 		gas, _ := IntrinsicGas(data, nil, false, false, false, false)
 		signer := gen.Signer()
 		gasPrice := big.NewInt(0)
@@ -180,16 +173,18 @@ func genUncles(i int, gen *BlockGen) {
 func benchInsertChain(b *testing.B, disk bool, gen func(int, *BlockGen)) {
 	// Create the database in memory or in a temporary directory.
 	var db ethdb.Database
+	var err error
 	if !disk {
 		db = rawdb.NewMemoryDatabase()
 	} else {
-		pdb, err := pebble.New(b.TempDir(), 128, 128, "", false)
+		dir := b.TempDir()
+		db, err = rawdb.NewLevelDBDatabase(dir, 128, 128, "", false)
 		if err != nil {
 			b.Fatalf("cannot create temporary database: %v", err)
 		}
-		db = rawdb.NewDatabase(pdb)
 		defer db.Close()
 	}
+
 	// Generate a chain of b.N blocks using the supplied block
 	// generator function.
 	gspec := &Genesis{
@@ -216,27 +211,15 @@ func BenchmarkChainRead_full_10k(b *testing.B) {
 	benchReadChain(b, true, 10000)
 }
 func BenchmarkChainRead_header_100k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping in short-mode")
-	}
 	benchReadChain(b, false, 100000)
 }
 func BenchmarkChainRead_full_100k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping in short-mode")
-	}
 	benchReadChain(b, true, 100000)
 }
 func BenchmarkChainRead_header_500k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping in short-mode")
-	}
 	benchReadChain(b, false, 500000)
 }
 func BenchmarkChainRead_full_500k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping in short-mode")
-	}
 	benchReadChain(b, true, 500000)
 }
 func BenchmarkChainWrite_header_10k(b *testing.B) {
@@ -252,15 +235,9 @@ func BenchmarkChainWrite_full_100k(b *testing.B) {
 	benchWriteChain(b, true, 100000)
 }
 func BenchmarkChainWrite_header_500k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping in short-mode")
-	}
 	benchWriteChain(b, false, 500000)
 }
 func BenchmarkChainWrite_full_500k(b *testing.B) {
-	if testing.Short() {
-		b.Skip("Skipping in short-mode")
-	}
 	benchWriteChain(b, true, 500000)
 }
 
@@ -304,11 +281,11 @@ func makeChainForBench(db ethdb.Database, genesis *Genesis, full bool, count uin
 func benchWriteChain(b *testing.B, full bool, count uint64) {
 	genesis := &Genesis{Config: params.AllEthashProtocolChanges}
 	for i := 0; i < b.N; i++ {
-		pdb, err := pebble.New(b.TempDir(), 1024, 128, "", false)
+		dir := b.TempDir()
+		db, err := rawdb.NewLevelDBDatabase(dir, 128, 1024, "", false)
 		if err != nil {
-			b.Fatalf("error opening database: %v", err)
+			b.Fatalf("error opening database at %v: %v", dir, err)
 		}
-		db := rawdb.NewDatabase(pdb)
 		makeChainForBench(db, genesis, full, count)
 		db.Close()
 	}
@@ -317,12 +294,10 @@ func benchWriteChain(b *testing.B, full bool, count uint64) {
 func benchReadChain(b *testing.B, full bool, count uint64) {
 	dir := b.TempDir()
 
-	pdb, err := pebble.New(dir, 1024, 128, "", false)
+	db, err := rawdb.NewLevelDBDatabase(dir, 128, 1024, "", false)
 	if err != nil {
-		b.Fatalf("error opening database: %v", err)
+		b.Fatalf("error opening database at %v: %v", dir, err)
 	}
-	db := rawdb.NewDatabase(pdb)
-
 	genesis := &Genesis{Config: params.AllEthashProtocolChanges}
 	makeChainForBench(db, genesis, full, count)
 	db.Close()
@@ -333,16 +308,15 @@ func benchReadChain(b *testing.B, full bool, count uint64) {
 	b.ResetTimer()
 
 	for i := 0; i < b.N; i++ {
-		pdb, err = pebble.New(dir, 1024, 128, "", false)
+		db, err := rawdb.NewLevelDBDatabase(dir, 128, 1024, "", false)
 		if err != nil {
-			b.Fatalf("error opening database: %v", err)
+			b.Fatalf("error opening database at %v: %v", dir, err)
 		}
-		db = rawdb.NewDatabase(pdb)
-
 		chain, err := NewBlockChain(db, &cacheConfig, genesis, nil, ethash.NewFaker(), vm.Config{}, nil)
 		if err != nil {
 			b.Fatalf("error creating chain: %v", err)
 		}
+
 		for n := uint64(0); n < count; n++ {
 			header := chain.GetHeaderByNumber(n)
 			if full {

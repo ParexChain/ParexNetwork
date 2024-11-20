@@ -35,7 +35,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/ethdb"
-	"github.com/ethereum/go-ethereum/ethdb/pebble"
 	"github.com/ethereum/go-ethereum/params"
 )
 
@@ -66,13 +65,13 @@ func (basic *snapshotTestBasic) prepare(t *testing.T) (*BlockChain, []*types.Blo
 	datadir := t.TempDir()
 	ancient := filepath.Join(datadir, "ancient")
 
-	pdb, err := pebble.New(datadir, 0, 0, "", false)
+	db, err := rawdb.Open(rawdb.OpenOptions{
+		Directory:         datadir,
+		AncientsDirectory: ancient,
+		Ephemeral:         true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create persistent key-value database: %v", err)
-	}
-	db, err := rawdb.NewDatabaseWithFreezer(pdb, ancient, "", false)
-	if err != nil {
-		t.Fatalf("Failed to create persistent freezer database: %v", err)
+		t.Fatalf("Failed to create persistent database: %v", err)
 	}
 	// Initialize a fresh chain
 	var (
@@ -257,13 +256,13 @@ func (snaptest *crashSnapshotTest) test(t *testing.T) {
 	chain.triedb.Close()
 
 	// Start a new blockchain back up and see where the repair leads us
-	pdb, err := pebble.New(snaptest.datadir, 0, 0, "", false)
+	newdb, err := rawdb.Open(rawdb.OpenOptions{
+		Directory:         snaptest.datadir,
+		AncientsDirectory: snaptest.ancient,
+		Ephemeral:         true,
+	})
 	if err != nil {
-		t.Fatalf("Failed to create persistent key-value database: %v", err)
-	}
-	newdb, err := rawdb.NewDatabaseWithFreezer(pdb, snaptest.ancient, "", false)
-	if err != nil {
-		t.Fatalf("Failed to create persistent freezer database: %v", err)
+		t.Fatalf("Failed to reopen persistent database: %v", err)
 	}
 	defer newdb.Close()
 

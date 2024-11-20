@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +70,7 @@ func TestJSONHandler(t *testing.T) {
 }
 
 func BenchmarkTraceLogging(b *testing.B) {
-	SetDefault(NewLogger(NewTerminalHandler(io.Discard, true)))
+	SetDefault(NewLogger(NewTerminalHandler(os.Stderr, true)))
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		Trace("a message", "v", i)

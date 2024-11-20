@@ -27,7 +27,6 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/eth/tracers"
-	"github.com/ethereum/go-ethereum/params"
 )
 
 func init() {
@@ -49,19 +48,17 @@ func init() {
 //	  0xc281d19e-0: 1
 //	}
 type fourByteTracer struct {
-	ids               map[string]int // ids aggregates the 4byte ids found
-	interrupt         atomic.Bool    // Atomic flag to signal execution interruption
-	reason            error          // Textual reason for the interruption
-	chainConfig       *params.ChainConfig
+	ids               map[string]int   // ids aggregates the 4byte ids found
+	interrupt         atomic.Bool      // Atomic flag to signal execution interruption
+	reason            error            // Textual reason for the interruption
 	activePrecompiles []common.Address // Updated on tx start based on given rules
 }
 
 // newFourByteTracer returns a native go tracer which collects
 // 4 byte-identifiers of a tx, and implements vm.EVMLogger.
-func newFourByteTracer(ctx *tracers.Context, cfg json.RawMessage, chainConfig *params.ChainConfig) (*tracers.Tracer, error) {
+func newFourByteTracer(ctx *tracers.Context, _ json.RawMessage) (*tracers.Tracer, error) {
 	t := &fourByteTracer{
-		ids:         make(map[string]int),
-		chainConfig: chainConfig,
+		ids: make(map[string]int),
 	}
 	return &tracers.Tracer{
 		Hooks: &tracing.Hooks{
@@ -91,7 +88,7 @@ func (t *fourByteTracer) store(id []byte, size int) {
 
 func (t *fourByteTracer) OnTxStart(env *tracing.VMContext, tx *types.Transaction, from common.Address) {
 	// Update list of precompiles based on current block
-	rules := t.chainConfig.Rules(env.BlockNumber, env.Random != nil, env.Time)
+	rules := env.ChainConfig.Rules(env.BlockNumber, env.Random != nil, env.Time)
 	t.activePrecompiles = vm.ActivePrecompiles(rules)
 }
 

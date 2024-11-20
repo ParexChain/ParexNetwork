@@ -24,7 +24,6 @@ import (
 	"math/big"
 	"os"
 	goruntime "runtime"
-	"slices"
 	"testing"
 	"time"
 
@@ -51,7 +50,7 @@ var runCommand = &cli.Command{
 	Usage:       "Run arbitrary evm binary",
 	ArgsUsage:   "<code>",
 	Description: `The run command runs arbitrary EVM code.`,
-	Flags:       slices.Concat(vmFlags, traceFlags),
+	Flags:       flags.Merge(vmFlags, traceFlags),
 }
 
 // readGenesis will read the given JSON format genesis file and return
@@ -76,53 +75,36 @@ func readGenesis(genesisPath string) *core.Genesis {
 }
 
 type execStats struct {
-	Time           time.Duration `json:"time"`           // The execution Time.
-	Allocs         int64         `json:"allocs"`         // The number of heap allocations during execution.
-	BytesAllocated int64         `json:"bytesAllocated"` // The cumulative number of bytes allocated during execution.
-	GasUsed        uint64        `json:"gasUsed"`        // the amount of gas used during execution
+	time           time.Duration // The execution time.
+	allocs         int64         // The number of heap allocations during execution.
+	bytesAllocated int64         // The cumulative number of bytes allocated during execution.
 }
 
-func timedExec(bench bool, execFunc func() ([]byte, uint64, error)) ([]byte, execStats, error) {
+func timedExec(bench bool, execFunc func() ([]byte, uint64, error)) (output []byte, gasLeft uint64, stats execStats, err error) {
 	if bench {
-		// Do one warm-up run
-		output, gasUsed, err := execFunc()
 		result := testing.Benchmark(func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
-				haveOutput, haveGasUsed, haveErr := execFunc()
-				if !bytes.Equal(haveOutput, output) {
-					b.Fatalf("output differs, have\n%x\nwant%x\n", haveOutput, output)
-				}
-				if haveGasUsed != gasUsed {
-					b.Fatalf("gas differs, have %v want%v", haveGasUsed, gasUsed)
-				}
-				if haveErr != err {
-					b.Fatalf("err differs, have %v want%v", haveErr, err)
-				}
+				output, gasLeft, err = execFunc()
 			}
 		})
+
 		// Get the average execution time from the benchmarking result.
 		// There are other useful stats here that could be reported.
-		stats := execStats{
-			Time:           time.Duration(result.NsPerOp()),
-			Allocs:         result.AllocsPerOp(),
-			BytesAllocated: result.AllocedBytesPerOp(),
-			GasUsed:        gasUsed,
-		}
-		return output, stats, err
+		stats.time = time.Duration(result.NsPerOp())
+		stats.allocs = result.AllocsPerOp()
+		stats.bytesAllocated = result.AllocedBytesPerOp()
+	} else {
+		var memStatsBefore, memStatsAfter goruntime.MemStats
+		goruntime.ReadMemStats(&memStatsBefore)
+		startTime := time.Now()
+		output, gasLeft, err = execFunc()
+		stats.time = time.Since(startTime)
+		goruntime.ReadMemStats(&memStatsAfter)
+		stats.allocs = int64(memStatsAfter.Mallocs - memStatsBefore.Mallocs)
+		stats.bytesAllocated = int64(memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc)
 	}
-	var memStatsBefore, memStatsAfter goruntime.MemStats
-	goruntime.ReadMemStats(&memStatsBefore)
-	t0 := time.Now()
-	output, gasUsed, err := execFunc()
-	duration := time.Since(t0)
-	goruntime.ReadMemStats(&memStatsAfter)
-	stats := execStats{
-		Time:           duration,
-		Allocs:         int64(memStatsAfter.Mallocs - memStatsBefore.Mallocs),
-		BytesAllocated: int64(memStatsAfter.TotalAlloc - memStatsBefore.TotalAlloc),
-		GasUsed:        gasUsed,
-	}
-	return output, stats, err
+
+	return output, gasLeft, stats, err
 }
 
 func runCmd(ctx *cli.Context) error {
@@ -282,13 +264,12 @@ func runCmd(ctx *cli.Context) error {
 			statedb.SetCode(receiver, code)
 		}
 		execFunc = func() ([]byte, uint64, error) {
-			output, gasLeft, err := runtime.Call(receiver, input, &runtimeConfig)
-			return output, initialGas - gasLeft, err
+			return runtime.Call(receiver, input, &runtimeConfig)
 		}
 	}
 
 	bench := ctx.Bool(BenchFlag.Name)
-	output, stats, err := timedExec(bench, execFunc)
+	output, leftOverGas, stats, err := timedExec(bench, execFunc)
 
 	if ctx.Bool(DumpFlag.Name) {
 		root, err := statedb.Commit(genesisConfig.Number, true)
@@ -318,7 +299,7 @@ func runCmd(ctx *cli.Context) error {
 execution time:  %v
 allocations:     %d
 allocated bytes: %d
-`, stats.GasUsed, stats.Time, stats.Allocs, stats.BytesAllocated)
+`, initialGas-leftOverGas, stats.time, stats.allocs, stats.bytesAllocated)
 	}
 	if tracer == nil {
 		fmt.Printf("%#x\n", output)
